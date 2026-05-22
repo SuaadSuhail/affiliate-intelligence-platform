@@ -1,0 +1,121 @@
+===EMAIL_001===
+affiliate_id: aff-003
+channel: email
+direction: inbound
+occurred_at: 2026-05-19T09:14:00
+subject: Re: Q3 Campaign Planning — Scale-Up Proposal
+
+Hi team,
+
+Following our call last week, I wanted to put some numbers to the scale-up plan we discussed.
+
+We're currently generating around $42k/month and I genuinely think we can double that by Q3 if we get the right support. I've been testing a new influencer channel on Instagram that's showing incredible early results — roughly 3x the conversion rate of our standard SEO traffic. I'd love to explore a partnership with 2–3 micro-influencers in the SaaS space.
+
+Additionally, I've been in talks with two podcast hosts in the productivity niche who would be a fantastic new audience for us. If we can get co-branded landing pages set up by mid-June, I think we can ramp up to $80k+ by September.
+
+I also wanted to ask — would you be open to bumping our commission rate to 32% for the influencer channel? Given the quality of traffic, I think it's worth discussing. Looking forward to hearing your thoughts!
+
+Thanks so much for all the support as always, it's always a pleasure working with your team.
+
+Best,
+Priya
+
+---
+EXPECTED TAGS: growth_intent, new_opportunity, pricing_concern, seasonal_pattern, relationship_warm, question_asked, feature_request
+
+
+===EMAIL_002===
+affiliate_id: aff-008
+channel: email
+direction: inbound
+occurred_at: 2026-05-21T16:47:00
+subject: Serious issues — considering moving to another network
+
+Hi,
+
+I'm writing to formally express my frustration with the platform. This is the third month in a row that my commission payment has been delayed. My invoice for April was due on the 15th and it's still not showing in my account — we're talking about $980 that I was counting on.
+
+On top of that, my tracking pixel has been firing inconsistently for the past two weeks. I reported this via the ticket system (ticket #4892) and haven't heard back. My conversion data is completely unreliable right now.
+
+Honestly, I've been in conversations with ShareASale and they seem to be able to offer more competitive rates anyway. If this isn't resolved ASAP, I'll have no choice but to move my campaigns there. I've already spoken to two other affiliates in my network who are having the same payment issues.
+
+I need a response today — this is urgent!!
+
+Tom Bauer
+
+---
+EXPECTED TAGS: churn_signal, payment_issue, technical_issue, competitor_mention, escalation_risk, satisfaction_low, urgency, question_asked
+
+
+===EMAIL_003===
+affiliate_id: aff-001
+channel: email
+direction: outbound
+occurred_at: 2026-05-20T11:30:00
+subject: Your Q2 Results + Black Friday Early Access
+
+Hi Sarah,
+
+Just wanted to drop a note to say your Q2 numbers are absolutely fantastic — you've been one of our strongest performers in the finance niche this year and the whole team has noticed.
+
+As we head into Q3 and start planning for Black Friday and Cyber Monday (BFCM), we wanted to give our Gold tier partners early access to our seasonal promotion toolkit. This includes co-branded BFCM landing pages, a dedicated tracking dashboard for the holiday season, and an increased commission rate of 28% on all new conversions between November 1st and December 31st.
+
+We'd love to jump on a quick 20-minute call this week to walk you through the assets. Would Thursday at 2pm EST work for you? We think this could be a huge opportunity to really grow your revenue in Q4.
+
+Looking forward to hearing from you!
+
+Warm regards,
+Alex — Partner Success Team
+
+---
+EXPECTED TAGS: satisfaction_high, seasonal_pattern, new_opportunity, growth_intent, relationship_warm, question_asked
+
+
+===EMAIL_004===
+affiliate_id: aff-004
+channel: email
+direction: inbound
+occurred_at: 2026-04-28T08:22:00
+subject: Potential policy violation query + account question
+
+Hi Support,
+
+I have a couple of things I need to raise.
+
+First — I received a warning message in my dashboard last week about potential trademark bidding on the brand name in Google Ads. I want to be transparent: I wasn't aware this was a prohibited practice under the terms of service. I've now paused those campaigns but I want to understand exactly what the policy violation entails and whether my account is at risk of being banned.
+
+Second, I'm confused about how the refund tracking works. I've had a spike in refunds this month — about 35% of my April conversions were reversed, which seems unusually high. Could this be related to bot traffic or invalid clicks from a traffic source I recently tested? I'd appreciate some guidance on how you investigate this.
+
+Can you please advise on both points? I'm quite new to the platform (joined in January) and want to make sure I'm fully compliant.
+
+Thanks,
+James
+
+---
+EXPECTED TAGS: compliance_issue, fraud_risk, support_request, question_asked, technical_issue
+
+
+===EMAIL_005===
+affiliate_id: aff-006
+channel: email
+direction: inbound
+occurred_at: 2026-05-14T14:05:00
+subject: Feature suggestion + quick question about reporting
+
+Hey,
+
+Hope you're having a great week!
+
+I've been using the platform for just over a year now and overall I'm really happy with it — the support team is always super helpful and the dashboard has improved a lot recently.
+
+One thing that would make a huge difference for me: I'd love to see a real-time attribution report broken down by traffic source AND device type simultaneously. Right now I can filter by one or the other but not both at the same time. Would it be possible to add this kind of cross-dimensional reporting? It would really help me optimise my health & wellness campaigns.
+
+Also, quick question — do you have an API endpoint for pulling raw conversion data? I'm building a custom dashboard for my clients and it would be amazing if I could integrate your data directly. I'd be happy to work with your dev team on this if it's something on the roadmap.
+
+Looking forward to hearing your thoughts, always appreciate the quick responses!
+
+Cheers,
+Carlos
+
+---
+EXPECTED TAGS: satisfaction_high, feature_request, support_request, question_asked, relationship_warm, new_opportunity

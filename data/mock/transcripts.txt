@@ -1,0 +1,86 @@
+===TRANSCRIPT_001===
+affiliate_id: aff-002
+channel: call
+direction: inbound
+occurred_at: 2026-05-08T15:00:00
+duration_minutes: 24
+subject: Account review call — Marcus Williams / Performance Plus
+
+[CALL BEGINS]
+
+AGENT (Alex): Hi Marcus, thanks for jumping on the call today. How are you doing?
+
+MARCUS: Honestly? Not great. I've been pretty frustrated with things lately and I wanted to have a frank conversation about where things stand.
+
+AGENT: Of course — I really appreciate you raising it directly. What's been going on?
+
+MARCUS: So, the main thing is the performance has just tanked over the last 60 days. My e-commerce conversions are down nearly 40% and I can't figure out if it's my traffic, the landing pages, or something on your end. I've been going back and forth with your support team but I'm not feeling like I'm getting anywhere.
+
+AGENT: That drop sounds really significant. Can you give me a rough timeline of when you first noticed it?
+
+MARCUS: It started around late March. And it coincided with — I think you pushed an update to your tracking system? Because my postback URLs stopped working correctly for about a week. I never got a proper explanation of whether that affected my conversion attribution.
+
+AGENT: I'm genuinely sorry about that, Marcus. I can confirm there was a tracking system update in late March and I'll pull the ticket history to see exactly what happened with your postbacks. That should have been communicated better.
+
+MARCUS: Right. And look — I've been looking at other networks. Impact Radius in particular has been on my case lately, offering what sounds like better rates. I haven't made any decisions but I'd be lying if I said I wasn't tempted. The commission rate I'm on now — 22% — just doesn't feel competitive anymore for the volume I'm doing.
+
+AGENT: I completely hear you on the commission rate, and given your history with us I think there's definitely a conversation to have there. What volume are you doing monthly at the moment?
+
+MARCUS: About $6,200 in revenue driven for you. It used to be closer to $9k before the March issues. I want to get back to that and beyond, but I need to feel like I have actual support to do that.
+
+AGENT: Absolutely. Here's what I'd like to propose: I'll personally review the March tracking incident and get you a written explanation by end of week. I'd also like to get our technical team on a call with you to do a full postback audit. And on the commission side — I can't promise anything today but I'll take a request for 26% to my manager and come back to you within 48 hours.
+
+MARCUS: Okay. That would actually be really helpful. I just need to feel like someone's paying attention, you know? If those things happen, I'm absolutely willing to give this another proper shot. I don't want to leave — it's just been really disappointing lately.
+
+AGENT: I completely understand, Marcus. You've been with us since July and we really value the relationship. I'll send a follow-up email with the action items within the hour.
+
+MARCUS: Appreciate it. Let's see how the next couple of weeks go.
+
+[CALL ENDS]
+
+---
+EXPECTED TAGS: churn_signal, payment_issue, technical_issue, competitor_mention, satisfaction_low, pricing_concern, support_request, relationship_warm, urgency, question_asked
+
+
+===TRANSCRIPT_002===
+affiliate_id: aff-010
+channel: call
+direction: outbound
+occurred_at: 2026-05-22T10:30:00
+duration_minutes: 31
+subject: Quarterly business review — Rachel Torres / Sunset Affiliates Co
+
+[CALL BEGINS]
+
+AGENT (Jordan): Rachel! Great to speak with you again. I've been looking forward to this QBR — your numbers have been absolutely phenomenal.
+
+RACHEL: Thanks Jordan! It's been a really exciting quarter, honestly. I feel like everything is finally clicking.
+
+AGENT: You've driven nearly $59k this month alone — that's a 27% increase from last quarter. What's been working so well?
+
+RACHEL: A few things. The email sequences we refined back in February have been performing way beyond expectations — open rates are up to 34% which is incredible for the lifestyle niche. And I've been layering in some Pinterest traffic which I genuinely think is an untapped goldmine for us. Lifestyle content on Pinterest converts really well and there's almost no competition from other affiliates there.
+
+AGENT: That's a fascinating insight on Pinterest. Have you seen that carry through to conversions or just top-of-funnel traffic?
+
+RACHEL: Both, actually. The conversion rate from Pinterest is 2.1% which is actually slightly above my email list. I think it's because the audience intent is really strong — they're in planning and buying mode. I'm planning to double down on that channel in Q3. If I can get to a $100k month by September, that would be the goal.
+
+AGENT: I love the ambition. Is there anything from our side that would help you hit that target?
+
+RACHEL: A couple of things, actually. First — I'd love to have co-branded landing pages specifically designed for the Pinterest aesthetic. Everything is very visual over there and our current landing pages are a bit generic. Second, I've been thinking about expanding into the home décor sub-niche within lifestyle — would that work with your current merchant portfolio?
+
+AGENT: Both very doable. On the landing pages, I can connect you with our design team this week. On the home décor expansion — we actually added three new home & living merchants in Q1 so the timing is perfect. I can get you an expanded commission structure for those.
+
+RACHEL: That's amazing! And honestly Jordan, the thing that keeps me loyal to this platform is how responsive you all are. I've been approached by Rakuten and Awin multiple times and I always tell them I'm not interested. The relationship we've built over five years is worth more than a slightly better rate elsewhere.
+
+AGENT: That really means a lot to hear, Rachel. We feel the same way — you're one of our flagship partners. Looking ahead to Black Friday and Cyber Monday — last year you had a massive Q4. Are you already planning for that?
+
+RACHEL: Oh absolutely! I've actually already started mapping out my BFCM content calendar. I want to start teasing lifestyle gift guides in October to build anticipation, then go hard from November 1st. I think we can potentially double Q4 revenue compared to last year if we coordinate well. I'd love to lock in a dedicated landing page and tracking setup for BFCM by September.
+
+AGENT: Consider it done. I'll get the BFCM planning doc started and share it with you by Friday. This is going to be a fantastic year.
+
+RACHEL: Absolutely! Really looking forward to it. Thanks so much for everything, Jordan.
+
+[CALL ENDS]
+
+---
+EXPECTED TAGS: growth_intent, new_opportunity, satisfaction_high, relationship_warm, seasonal_pattern, competitor_mention, feature_request, high_engagement, question_asked

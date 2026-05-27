@@ -31,12 +31,6 @@ services:
       - "8001:8000"
     volumes:
       - chroma_data:/chroma/chroma
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
   app:
     build:
@@ -52,7 +46,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-aip_user}:${POSTGRES_PASSWORD:-aip_secret}@postgres:5432/${POSTGRES_DB:-affiliate_intelligence}
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
+      - CHROMA_PORT=8001
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     ports:
       - "8080:8080"

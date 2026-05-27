@@ -45,28 +45,29 @@ health_score = ((1 - churn_risk_score) × 0.6 + growth_potential_score × 0.4) �
 
 ## Quick Start
 
-### 1. Clone & configure
+### 1. Clone the repo
 
 ```bash
-git clone <repo>
+git clone https://github.com/SuaadSuhail/affiliate-intelligence-platform.git
 cd affiliate-intelligence-platform
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY and database credentials
 ```
 
-### 2. Start infrastructure
+### 2. Create the conda environment & configure
+
+```bash
+conda env create -f environment.yml
+conda activate affiliate-intelligence
+python -m spacy download en_core_web_sm
+cp .env.example .env          # then fill in your values
+```
+
+> **`.env` values you must set:** `OPENAI_API_KEY`, `POSTGRES_PASSWORD`, `CHROMA_TOKEN`  
+> All other values have working defaults for local development.
+
+### 3. Start infrastructure
 
 ```bash
 docker-compose up -d postgres chromadb
-```
-
-### 3. Install Python dependencies
-
-```bash
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
 ```
 
 ### 4. Seed mock data
@@ -98,6 +99,7 @@ uvicorn src.api.main:app --reload
 affiliate-intelligence-platform/
 ├── CLAUDE.md               ← Single source of truth (read this first)
 ├── docker-compose.yml
+├── environment.yml         ← Conda environment (pinned deps)
 ├── .env.example
 ├── requirements.txt
 ├── data/

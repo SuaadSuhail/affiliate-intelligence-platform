@@ -28,6 +28,10 @@ Thumbs.db
 # VS Code
 .vscode/settings.json
 
+# Conda
+affiliate-intelligence/
+.conda/
+
 # Logs
 *.log
 logs/

@@ -1,94 +1,145 @@
 """
-SQLAlchemy ORM models.
+SQLAlchemy ORM models — single source of truth for the database schema.
 
 Tables
 ------
-affiliates      — one row per affiliate partner
-communications  — every email / call / chat / ticket
-score_history   — time-series of health scores + SHAP snapshots
+affiliates      one row per affiliate partner
+communications  every ingested email / call / API event
+score_history   daily score snapshots (one row per affiliate per day)
+
+Schema reference: CLAUDE.md § 3
 """
 
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 
 from sqlalchemy import (
-    Column, String, Float, Date, DateTime, Text,
-    ForeignKey, Index, func,
+    Column,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+
+# ── Shared base ───────────────────────────────────────────────────────────────
 
 class Base(DeclarativeBase):
     pass
 
 
-# ─── Affiliates ──────────────────────────────────────────────────────────────
+# ── Enum type definitions ─────────────────────────────────────────────────────
+
+AffiliateStatus = Enum(
+    "active",
+    "at_risk",
+    "churned",
+    "high_growth",
+    name="affiliate_status",
+)
+
+CommunicationSource = Enum(
+    "email",
+    "call",
+    "api_event",
+    name="communication_source",
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Affiliate
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Affiliate(Base):
     __tablename__ = "affiliates"
 
-    id = Column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
-    email = Column(String(255), unique=True, nullable=False)
-    company = Column(String(255))
-    tier = Column(String(20), nullable=False, default="bronze")  # bronze|silver|gold|platinum
-    join_date = Column(Date, nullable=False, default=date.today)
-    country = Column(String(100))
-    niche = Column(String(100))           # e.g. finance, travel, SaaS, e-commerce
-    traffic_source = Column(String(100))  # SEO | PPC | Social | Email | Influencer
 
-    monthly_revenue = Column(Float, default=0.0)
+    # Lifecycle status — drives dashboard colouring and alert routing
+    status = Column(AffiliateStatus, nullable=False, default="active")
 
-    # Model outputs — refreshed each time score pipeline runs
-    churn_risk_score = Column(Float, default=0.5)
-    growth_potential_score = Column(Float, default=0.5)
-    health_score = Column(Float, default=50.0)
+    # ML model outputs — refreshed by the scoring pipeline
+    churn_risk_score = Column(Float, nullable=False, default=0.0)
+    growth_potential_score = Column(Float, nullable=False, default=0.0)
+    health_score = Column(Float, nullable=False, default=0.0)
 
-    last_contact_date = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    # Revenue and engagement metrics
+    revenue_30d = Column(Numeric(10, 2), nullable=False, default=0.0)
+    ctr_trend_pct = Column(Float, nullable=False, default=0.0)  # % change in CTR
+
+    # Contact recency — last_contact_at is set externally;
+    # days_since_contact is recomputed automatically before every save.
+    last_contact_at = Column(DateTime(timezone=True), nullable=True)
+    days_since_contact = Column(Integer, nullable=False, default=0)
+
+    # Audit
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
     # Relationships
     communications = relationship(
-        "Communication", back_populates="affiliate", cascade="all, delete-orphan"
+        "Communication",
+        back_populates="affiliate",
+        cascade="all, delete-orphan",
     )
     score_history = relationship(
-        "ScoreHistory", back_populates="affiliate", cascade="all, delete-orphan"
+        "ScoreHistory",
+        back_populates="affiliate",
+        cascade="all, delete-orphan",
     )
 
     __table_args__ = (
-        Index("ix_affiliates_email", "email"),
-        Index("ix_affiliates_tier", "tier"),
-        Index("ix_affiliates_churn_risk", "churn_risk_score"),
-        Index("ix_affiliates_growth", "growth_potential_score"),
+        Index("ix_affiliates_status", "status"),
+        Index("ix_affiliates_health_score", "health_score"),
     )
 
     def __repr__(self) -> str:
         return (
             f"<Affiliate id={self.id} name={self.name!r} "
-            f"tier={self.tier} health={self.health_score:.1f}>"
-        )
-
-    @property
-    def health_score_computed(self) -> float:
-        """Re-compute health score from current model scores."""
-        return round(
-            ((1 - self.churn_risk_score) * 0.6 + self.growth_potential_score * 0.4) * 100,
-            1,
+            f"status={self.status} health={self.health_score:.2f}>"
         )
 
 
-# ─── Communications ──────────────────────────────────────────────────────────
+# ── Event: recompute days_since_contact before every insert / update ──────────
+
+def _compute_days_since_contact(
+    mapper,      # noqa: ARG001  (required by SQLAlchemy event signature)
+    connection,  # noqa: ARG001
+    target: Affiliate,
+) -> None:
+    """Recompute days_since_contact from last_contact_at before saving."""
+    if target.last_contact_at is None:
+        target.days_since_contact = 0
+        return
+    now = datetime.now(timezone.utc)
+    lc = target.last_contact_at
+    if lc.tzinfo is None:
+        lc = lc.replace(tzinfo=timezone.utc)
+    target.days_since_contact = max(0, (now - lc).days)
+
+
+event.listen(Affiliate, "before_insert", _compute_days_since_contact)
+event.listen(Affiliate, "before_update", _compute_days_since_contact)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Communication
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Communication(Base):
     __tablename__ = "communications"
@@ -99,42 +150,45 @@ class Communication(Base):
         ForeignKey("affiliates.id", ondelete="CASCADE"),
         nullable=False,
     )
-    channel = Column(String(20), nullable=False)     # email | call | chat | ticket
-    direction = Column(String(10), nullable=False)   # inbound | outbound
-    subject = Column(String(500))
-    content = Column(Text, nullable=False)
 
-    # NLP outputs
-    sentiment_score = Column(Float)                  # VADER compound: -1.0 to 1.0
-    sentiment_label = Column(String(20))             # positive | neutral | negative
-    tags = Column(JSONB, nullable=False, default=list)  # ["growth_intent", ...]
-    embedding_id = Column(String(255))               # ChromaDB document ID
+    source = Column(CommunicationSource, nullable=False)
+    raw_text = Column(Text, nullable=False)
+
+    # NLP outputs — populated by the ingestion pipeline
+    tags = Column(ARRAY(String()), nullable=False, default=list)
+    sentiment_score = Column(Float, nullable=False, default=0.0)
+    embedding_id = Column(String(255), nullable=True)  # ChromaDB document ID
 
     occurred_at = Column(DateTime(timezone=True), nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
-    )
 
-    # Relationships
+    # Relationship
     affiliate = relationship("Affiliate", back_populates="communications")
 
     __table_args__ = (
-        Index("ix_comms_affiliate_id", "affiliate_id"),
-        Index("ix_comms_occurred_at", "occurred_at"),
-        Index("ix_comms_channel", "channel"),
-        Index("ix_comms_tags", "tags", postgresql_using="gin"),
+        Index("ix_communications_affiliate_id", "affiliate_id"),
+        Index("ix_communications_occurred_at", "occurred_at"),
+        Index("ix_communications_source", "source"),
     )
 
     def __repr__(self) -> str:
         return (
-            f"<Communication id={self.id} affiliate={self.affiliate_id} "
-            f"channel={self.channel} tags={self.tags}>"
+            f"<Communication id={self.id} affiliate_id={self.affiliate_id} "
+            f"source={self.source} sentiment={self.sentiment_score:.3f}>"
         )
 
 
-# ─── ScoreHistory ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ScoreHistory
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ScoreHistory(Base):
+    """
+    One row per affiliate per day.
+
+    The unique constraint on (affiliate_id, scored_at) ensures we never
+    accumulate more than one snapshot per day — the scoring pipeline should
+    upsert via merge_score() rather than blindly inserting.
+    """
     __tablename__ = "score_history"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -144,25 +198,21 @@ class ScoreHistory(Base):
         nullable=False,
     )
 
+    scored_at = Column(Date, nullable=False, default=date.today)
     churn_risk_score = Column(Float, nullable=False)
     growth_potential_score = Column(Float, nullable=False)
     health_score = Column(Float, nullable=False)
 
-    # Snapshot of the feature vector used to produce these scores
-    features = Column(JSONB, nullable=False, default=dict)
-
-    # SHAP values: {feature_name: shap_value} for explainability
-    shap_values = Column(JSONB, nullable=False, default=dict)
-
-    model_version = Column(String(50), nullable=False, default="1.0.0")
-    scored_at = Column(
-        DateTime(timezone=True), nullable=False, default=datetime.utcnow
-    )
-
-    # Relationships
+    # Relationship
     affiliate = relationship("Affiliate", back_populates="score_history")
 
     __table_args__ = (
+        # One score snapshot per affiliate per day
+        UniqueConstraint(
+            "affiliate_id",
+            "scored_at",
+            name="uq_score_history_affiliate_day",
+        ),
         Index("ix_score_history_affiliate_id", "affiliate_id"),
         Index("ix_score_history_scored_at", "scored_at"),
     )
@@ -170,6 +220,8 @@ class ScoreHistory(Base):
     def __repr__(self) -> str:
         return (
             f"<ScoreHistory affiliate={self.affiliate_id} "
-            f"churn={self.churn_risk_score:.2f} growth={self.growth_potential_score:.2f} "
-            f"health={self.health_score:.1f} at={self.scored_at}>"
+            f"date={self.scored_at} "
+            f"churn={self.churn_risk_score:.3f} "
+            f"growth={self.growth_potential_score:.3f} "
+            f"health={self.health_score:.2f}>"
         )

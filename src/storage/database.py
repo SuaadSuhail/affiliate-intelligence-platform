@@ -1,17 +1,22 @@
 """
-PostgreSQL connection and session management.
-Uses SQLAlchemy 2.x async-compatible session factory.
+Database connection and session management.
+
+Loads configuration from .env via python-dotenv.
+Creates a SQLAlchemy engine with connection pooling and exposes:
+
+  - SessionLocal  : session factory used by all modules
+  - get_db()      : FastAPI dependency that yields a session
+  - create_all_tables() : idempotent schema creation with clear error
+                          message if PostgreSQL is not reachable
 """
 
 import os
-from contextlib import contextmanager
 from typing import Generator
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker, Session
-
-from src.storage.models import Base
 
 load_dotenv()
 
@@ -20,36 +25,37 @@ DATABASE_URL: str = os.getenv(
     "postgresql://aip_user:aip_secret@localhost:5432/affiliate_intelligence",
 )
 
+# ── Engine ────────────────────────────────────────────────────────────────────
+# pool_pre_ping recycles connections that have gone stale while idle.
+# pool_size / max_overflow keep resource use predictable in local dev.
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,       # recycle stale connections
-    pool_size=10,
-    max_overflow=20,
-    echo=False,               # set True to log SQL statements
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    echo=False,  # set True to print generated SQL to stdout
 )
 
+# ── Session factory ───────────────────────────────────────────────────────────
 SessionLocal = sessionmaker(
     bind=engine,
     autocommit=False,
     autoflush=False,
-    expire_on_commit=False,
+    expire_on_commit=False,  # keep objects usable after commit
 )
 
 
-def init_db() -> None:
-    """Create all tables defined in models.py if they do not exist."""
-    Base.metadata.create_all(bind=engine)
-    print("[database] Tables created / verified.")
-
+# ── FastAPI dependency ────────────────────────────────────────────────────────
 
 def get_db() -> Generator[Session, None, None]:
     """
-    FastAPI dependency — yields a database session and closes it afterwards.
+    Yield a database session and guarantee it is closed when the
+    request finishes, even if an exception is raised.
 
-    Usage:
-        @app.get("/example")
-        def example(db: Session = Depends(get_db)):
-            ...
+    Usage (FastAPI):
+        @app.get("/affiliates")
+        def list_affiliates(db: Session = Depends(get_db)):
+            return db.query(Affiliate).all()
     """
     db: Session = SessionLocal()
     try:
@@ -58,32 +64,32 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-@contextmanager
-def db_session() -> Generator[Session, None, None]:
-    """
-    Context-manager session for use outside FastAPI (scripts, agent tools).
+# ── Schema creation ───────────────────────────────────────────────────────────
 
-    Usage:
-        with db_session() as db:
-            affiliates = db.query(Affiliate).all()
+def create_all_tables() -> None:
     """
-    db: Session = SessionLocal()
+    Create every table defined in models.py if it does not already exist.
+
+    This function is idempotent — safe to call on every application start.
+    Raises OperationalError with a clear message if PostgreSQL is not
+    reachable, so the developer knows exactly what to fix.
+    """
+    # Local import prevents a circular dependency at engine-initialisation
+    # time: database.py creates the engine first; models.py can safely import
+    # anything it needs without risk of a half-initialised engine.
+    from src.storage.models import Base  # noqa: PLC0415
+
     try:
-        yield db
-        db.commit()
-    except Exception:
-        db.rollback()
+        Base.metadata.create_all(bind=engine)
+        print("[database] Tables created / verified successfully.")
+    except OperationalError as exc:
+        _reason = getattr(exc, "orig", exc)
+        print(
+            f"\n[database] ✗ Could not connect to PostgreSQL.\n"
+            f"  URL : {DATABASE_URL}\n"
+            f"  Why : {_reason}\n\n"
+            f"  Fix : start PostgreSQL with\n"
+            f"        docker-compose up -d postgres\n"
+            f"        and then retry.\n"
+        )
         raise
-    finally:
-        db.close()
-
-
-def health_check() -> bool:
-    """Return True if the database is reachable."""
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"[database] Health check failed: {exc}")
-        return False

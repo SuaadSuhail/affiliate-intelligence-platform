@@ -2,14 +2,25 @@
 Embedding Generator
 ===================
 Converts text to 384-dim vectors using sentence-transformers/all-MiniLM-L6-v2
-and upserts them into ChromaDB via the VectorStore wrapper.
+and provides index helpers for ChromaDB via the vector_store module.
+
+ChromaDB's default embedding function (ONNXMiniLM / all-MiniLM-L6-v2) handles
+upserts automatically, so index_communication() delegates directly to
+vector_store.add_document() rather than pre-computing vectors.  The embed() /
+embed_batch() methods remain available for tasks that need raw vectors
+(feature engineering, external ranking, etc.).
 
 Usage
 -----
-    from src.ingestion.embedding_generator import EmbeddingGenerator
-    gen = EmbeddingGenerator()
-    embedding = gen.embed("some text")
-    gen.index_communication(comm, affiliate_id="aff-001")
+    from src.ingestion.embedding_generator import get_generator
+
+    gen = get_generator()
+    doc_id = gen.index_communication(
+        comm_id="abc-123", text="...", affiliate_id="...",
+        affiliate_name="Priya Sharma", source="email",
+        tags=["growth_intent"], occurred_at="2026-05-19T09:14:00",
+    )
+    results = gen.search_communications("payment issue", n_results=5)
 """
 
 import os
@@ -18,7 +29,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
-from src.storage.vector_store import vector_store
+import src.storage.vector_store as vs
 
 load_dotenv()
 
@@ -29,14 +40,15 @@ MODEL_NAME: str = os.getenv(
 
 class EmbeddingGenerator:
     """
-    Wraps a SentenceTransformer model and provides index helpers for
-    both ChromaDB collections.
+    Wraps a SentenceTransformer model and provides index helpers for ChromaDB.
     """
 
     def __init__(self, model_name: str = MODEL_NAME) -> None:
         print(f"[embedding_generator] Loading model: {model_name}")
         self.model = SentenceTransformer(model_name)
         self.model_name = model_name
+
+    # ── Raw embedding helpers ──────────────────────────────────────────────────
 
     def embed(self, text: str) -> list[float]:
         """Return a 384-dim embedding for a single piece of text."""
@@ -52,98 +64,50 @@ class EmbeddingGenerator:
     def index_communication(
         self,
         comm_id: str,
-        content: str,
+        text: str,
         affiliate_id: str,
-        channel: str,
-        direction: str,
-        sentiment_label: str,
+        affiliate_name: str,
+        source: str,           # email | call | api_event
         tags: list[str],
         occurred_at: str,
     ) -> str:
         """
-        Embed a communication and upsert it into ChromaDB.
+        Upsert a communication document into the affiliate_comms ChromaDB
+        collection.  ChromaDB embeds the text automatically via its built-in
+        ONNXMiniLM function — no manual embedding step needed here.
 
         Parameters
         ----------
-        comm_id        : UUID of the Communication row (will be prefixed with "comm_")
-        content        : full text of the communication
-        affiliate_id   : UUID of the parent Affiliate
-        channel        : email | call | chat | ticket
-        direction      : inbound | outbound
-        sentiment_label: positive | neutral | negative
+        comm_id        : UUID of the Communication row
+        text           : full raw text of the communication
+        affiliate_id   : UUID string of the parent Affiliate row
+        affiliate_name : human-readable affiliate name (displayed in search results)
+        source         : one of email | call | api_event
         tags           : list of NLP tag strings
-        occurred_at    : ISO datetime string
+        occurred_at    : ISO-8601 datetime string
 
-        Returns the ChromaDB document ID.
+        Returns the ChromaDB document ID (``f"comm_{comm_id}"``).
         """
         doc_id = f"comm_{comm_id}"
-        embedding = self.embed(content)
-        metadata = {
-            "affiliate_id": str(affiliate_id),
-            "channel": channel,
-            "direction": direction,
-            "sentiment_label": sentiment_label,
-            "tags": "|".join(tags),  # ChromaDB metadata must be primitive
-            "occurred_at": occurred_at,
-        }
-        vector_store.upsert_communication(
-            comm_id=doc_id,
-            embedding=embedding,
-            document=content,
-            metadata=metadata,
+        vs.add_document(
+            doc_id=doc_id,
+            text=text,
+            affiliate_id=affiliate_id,
+            affiliate_name=affiliate_name,
+            source=source,
+            tags=tags,
+            occurred_at=occurred_at,
         )
         return doc_id
 
-    # ── Affiliate profile indexing ─────────────────────────────────────────────
-
-    def index_affiliate_profile(
-        self,
-        affiliate_id: str,
-        name: str,
-        company: Optional[str],
-        niche: Optional[str],
-        traffic_source: Optional[str],
-        tier: str,
-        monthly_revenue: float,
-        churn_risk_score: float,
-        growth_potential_score: float,
-        health_score: float,
-    ) -> str:
-        """
-        Build a summary string for an affiliate, embed it, and upsert into
-        the affiliate_profiles ChromaDB collection.
-
-        Returns the ChromaDB document ID.
-        """
-        document = (
-            f"{name} | {company or 'unknown'} | {niche or 'unknown'} | "
-            f"{traffic_source or 'unknown'} | tier={tier} | "
-            f"revenue={monthly_revenue:.2f}"
-        )
-        embedding = self.embed(document)
-        metadata = {
-            "affiliate_id": str(affiliate_id),
-            "tier": tier,
-            "niche": niche or "",
-            "churn_risk_score": round(churn_risk_score, 4),
-            "growth_potential_score": round(growth_potential_score, 4),
-            "health_score": round(health_score, 2),
-        }
-        vector_store.upsert_affiliate_profile(
-            affiliate_id=str(affiliate_id),
-            embedding=embedding,
-            document=document,
-            metadata=metadata,
-        )
-        return f"aff_{affiliate_id}"
-
-    # ── Semantic search helpers ────────────────────────────────────────────────
+    # ── Semantic search ────────────────────────────────────────────────────────
 
     def search_communications(
         self,
         query: str,
         n_results: int = 5,
         affiliate_id: Optional[str] = None,
+        filter_tags: Optional[list[str]] = None,
     ) -> list[dict]:
         """
         Semantic search over indexed communications.
@@ -152,50 +116,23 @@ class EmbeddingGenerator:
         ----------
         query        : natural-language search query
         n_results    : number of results to return
-        affiliate_id : optional filter to a single affiliate
+        affiliate_id : optional UUID string — restrict to one affiliate
+        filter_tags  : optional list of tags; all must be present (client-side)
 
-        Returns a list of dicts with keys: id, document, metadata, distance
+        Returns a list of dicts with keys:
+            id, document, affiliate_id, affiliate_name, source, tags,
+            occurred_at, distance
         """
-        embedding = self.embed(query)
-        where = {"affiliate_id": affiliate_id} if affiliate_id else None
-        raw = vector_store.search_communications(
-            query_embedding=embedding,
+        return vs.search_similar(
+            query=query,
             n_results=n_results,
-            where=where,
+            filter_tags=filter_tags,
+            filter_affiliate_id=affiliate_id,
         )
-        results = []
-        for i in range(len(raw["ids"][0])):
-            results.append({
-                "id": raw["ids"][0][i],
-                "document": raw["documents"][0][i],
-                "metadata": raw["metadatas"][0][i],
-                "distance": raw["distances"][0][i],
-            })
-        return results
-
-    def search_similar_affiliates(
-        self,
-        query: str,
-        n_results: int = 5,
-    ) -> list[dict]:
-        """Find affiliates with profiles semantically similar to the query."""
-        embedding = self.embed(query)
-        raw = vector_store.find_similar_affiliates(
-            query_embedding=embedding,
-            n_results=n_results,
-        )
-        results = []
-        for i in range(len(raw["ids"][0])):
-            results.append({
-                "id": raw["ids"][0][i],
-                "document": raw["documents"][0][i],
-                "metadata": raw["metadatas"][0][i],
-                "distance": raw["distances"][0][i],
-            })
-        return results
 
 
-# Module-level singleton
+# ── Module-level singleton ─────────────────────────────────────────────────────
+
 _generator: Optional[EmbeddingGenerator] = None
 
 

@@ -63,101 +63,110 @@ which assigns zero or more tags as a JSON list stored in `communications.tags`.
 
 Database: `affiliate_intelligence`
 
-### 3.1 `affiliates`
+> **Implementation file:** `src/storage/models.py` — this section must stay in sync with it.
+
+### 3.1 Enum types
+
+```sql
+CREATE TYPE affiliate_status     AS ENUM ('active', 'at_risk', 'churned', 'high_growth');
+CREATE TYPE communication_source AS ENUM ('email', 'call', 'api_event');
+```
+
+### 3.2 `affiliates`
 
 ```sql
 CREATE TABLE affiliates (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            VARCHAR(255)   NOT NULL,
-    email           VARCHAR(255)   UNIQUE NOT NULL,
-    company         VARCHAR(255),
-    tier            VARCHAR(20)    NOT NULL DEFAULT 'bronze',   -- bronze | silver | gold | platinum
-    join_date       DATE           NOT NULL,
-    country         VARCHAR(100),
-    niche           VARCHAR(100),                               -- e.g. finance, travel, SaaS, e-commerce
-    traffic_source  VARCHAR(100),                               -- SEO | PPC | Social | Email | Influencer
-    monthly_revenue DECIMAL(12,2)  DEFAULT 0.00,               -- last full-month revenue generated
-    churn_risk_score     FLOAT     DEFAULT 0.50,               -- 0.0–1.0
-    growth_potential_score FLOAT   DEFAULT 0.50,               -- 0.0–1.0
-    health_score         FLOAT     DEFAULT 50.0,               -- 0–100
-    last_contact_date    TIMESTAMP,
-    created_at      TIMESTAMP      NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMP      NOT NULL DEFAULT NOW()
+    id                      UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                    VARCHAR(255) NOT NULL,
+    status                  affiliate_status NOT NULL DEFAULT 'active',
+
+    -- ML model outputs (refreshed by scoring pipeline)
+    churn_risk_score        FLOAT        NOT NULL DEFAULT 0.0,   -- 0.0–1.0
+    growth_potential_score  FLOAT        NOT NULL DEFAULT 0.0,   -- 0.0–1.0
+    health_score            FLOAT        NOT NULL DEFAULT 0.0,   -- 0–100
+
+    -- Revenue & engagement
+    revenue_30d             NUMERIC(10,2) NOT NULL DEFAULT 0.0,  -- last 30-day revenue
+    ctr_trend_pct           FLOAT        NOT NULL DEFAULT 0.0,   -- % change in CTR
+
+    -- Contact recency
+    last_contact_at         TIMESTAMPTZ,
+    days_since_contact      INTEGER      NOT NULL DEFAULT 0,     -- recomputed on every save
+
+    -- Audit
+    updated_at              TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 ```
 
-**Indexes:** `email`, `tier`, `churn_risk_score DESC`, `growth_potential_score DESC`
+**Indexes:** `ix_affiliates_status (status)`, `ix_affiliates_health_score (health_score)`
 
-### 3.2 `communications`
+> `days_since_contact` is recomputed automatically by a SQLAlchemy `before_insert` /
+> `before_update` event listener — never set it manually.
+
+### 3.3 `communications`
 
 ```sql
 CREATE TABLE communications (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    affiliate_id    UUID           NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
-    channel         VARCHAR(20)    NOT NULL,   -- email | call | chat | ticket
-    direction       VARCHAR(10)    NOT NULL,   -- inbound | outbound
-    subject         VARCHAR(500),
-    content         TEXT           NOT NULL,
-    sentiment_score FLOAT,                     -- VADER compound: -1.0 to 1.0
-    sentiment_label VARCHAR(20),               -- positive | neutral | negative
-    tags            JSONB          NOT NULL DEFAULT '[]',
-    embedding_id    VARCHAR(255),              -- ChromaDB document ID reference
-    occurred_at     TIMESTAMP      NOT NULL,
-    created_at      TIMESTAMP      NOT NULL DEFAULT NOW()
+    id              UUID                 PRIMARY KEY DEFAULT gen_random_uuid(),
+    affiliate_id    UUID                 NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+    source          communication_source NOT NULL,   -- email | call | api_event
+    raw_text        TEXT                 NOT NULL,
+    tags            TEXT[]               NOT NULL DEFAULT '{}',  -- NLP tag array
+    sentiment_score FLOAT                NOT NULL DEFAULT 0.0,   -- VADER compound: -1.0 to 1.0
+    embedding_id    VARCHAR(255),                                 -- ChromaDB document ID
+    occurred_at     TIMESTAMPTZ          NOT NULL
 );
 ```
 
-**Indexes:** `affiliate_id`, `occurred_at DESC`, `channel`, GIN index on `tags`
+**Indexes:** `ix_communications_affiliate_id`, `ix_communications_occurred_at`, `ix_communications_source`
 
-### 3.3 `score_history`
+### 3.4 `score_history`
 
 ```sql
 CREATE TABLE score_history (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    affiliate_id    UUID           NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
-    churn_risk_score      FLOAT    NOT NULL,
-    growth_potential_score FLOAT   NOT NULL,
-    health_score          FLOAT    NOT NULL,
-    features        JSONB          NOT NULL DEFAULT '{}',  -- raw feature vector snapshot
-    shap_values     JSONB          NOT NULL DEFAULT '{}',  -- {feature: shap_value} for explainability
-    model_version   VARCHAR(50)    NOT NULL DEFAULT '1.0.0',
-    scored_at       TIMESTAMP      NOT NULL DEFAULT NOW()
+    id                      UUID  PRIMARY KEY DEFAULT gen_random_uuid(),
+    affiliate_id            UUID  NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+    scored_at               DATE  NOT NULL DEFAULT CURRENT_DATE,
+    churn_risk_score        FLOAT NOT NULL,
+    growth_potential_score  FLOAT NOT NULL,
+    health_score            FLOAT NOT NULL,
+    UNIQUE (affiliate_id, scored_at)   -- one snapshot per affiliate per day
 );
 ```
 
-**Indexes:** `affiliate_id`, `scored_at DESC`
+**Indexes:** `ix_score_history_affiliate_id`, `ix_score_history_scored_at`
 
 ---
 
 ## 4. ChromaDB Collection Structure
 
-### 4.1 `communications_embeddings`
+> **Implementation file:** `src/storage/vector_store.py`
 
-Stores one document per communication.
+### 4.1 `affiliate_comms`
 
-| Field | Value |
-|---|---|
-| **collection** | `communications_embeddings` |
-| **model** | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
-| **document** | Full `content` text |
-| **id** | `comm_{uuid}` |
-| **metadata** | `affiliate_id`, `channel`, `direction`, `sentiment_label`, `tags` (pipe-joined string), `occurred_at` (ISO) |
-
-Used for: semantic search over past communications, RAG context for agent.
-
-### 4.2 `affiliate_profiles`
-
-Stores one document per affiliate — a concatenated summary of their profile + recent comms.
+Single collection — one document per `Communication` row.
 
 | Field | Value |
 |---|---|
-| **collection** | `affiliate_profiles` |
-| **model** | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
-| **document** | `f"{name} | {company} | {niche} | {traffic_source} | tier={tier} | revenue={monthly_revenue}"` |
-| **id** | `aff_{uuid}` |
-| **metadata** | `affiliate_id`, `tier`, `niche`, `churn_risk_score`, `growth_potential_score`, `health_score` |
+| **collection** | `affiliate_comms` |
+| **similarity** | cosine (`hnsw:space = cosine`) |
+| **embedding model** | ChromaDB default ONNXMiniLM (all-MiniLM-L6-v2, 384 dims) — auto-applied on upsert |
+| **document** | Full `raw_text` of the communication |
+| **id** | `comm_{uuid}` — matches `Communication.embedding_id` |
+| **metadata.affiliate_id** | UUID string of the parent `Affiliate` row |
+| **metadata.affiliate_name** | Human-readable affiliate name |
+| **metadata.source** | `email` \| `call` \| `api_event` |
+| **metadata.tags** | Pipe-joined tag string, e.g. `"churn_signal\|urgency"` |
+| **metadata.occurred_at** | ISO-8601 datetime string |
 
-Used for: finding similar affiliates, clustering, agent profile lookups.
+Used for: semantic search over past communications, RAG context for the agent.
+
+**Key public functions** (`src/storage/vector_store.py`):
+- `add_document(doc_id, text, affiliate_id, affiliate_name, source, tags, occurred_at)`
+- `search_similar(query, n_results, filter_tags, filter_affiliate_id) → list[dict]`
+- `get_by_affiliate(affiliate_id, limit) → list[dict]`
+- `delete_by_affiliate(affiliate_id)`
+- `health_check() → bool`
 
 ---
 
@@ -166,18 +175,18 @@ Used for: finding similar affiliates, clustering, agent profile lookups.
 ### Churn Model (`churn_model.py`)
 - **Algorithm**: XGBoostClassifier
 - **Target**: `churn_risk_score` (binary label: churned within 90 days)
-- **Key features**: days_since_last_contact, churn_signal_count, satisfaction_low_count,
+- **Key features**: days_since_contact, churn_signal_count, satisfaction_low_count,
   competitor_mention_count, payment_issue_count, escalation_risk_count,
-  avg_sentiment_score (30d), comm_frequency_decline_ratio, days_since_join,
-  monthly_revenue, tier_encoded
+  avg_sentiment_score (30d), comm_frequency_decline_ratio,
+  revenue_30d, ctr_trend_pct, status_encoded
 
 ### Growth Model (`growth_model.py`)
 - **Algorithm**: XGBoostClassifier
 - **Target**: `growth_potential_score` (binary label: revenue grew ≥ 20% in 90 days)
 - **Key features**: growth_intent_count, new_opportunity_count, satisfaction_high_count,
   high_engagement_count, seasonal_pattern_count, feature_request_count,
-  avg_sentiment_score (30d), comm_frequency_growth_ratio, monthly_revenue,
-  tier_encoded, relationship_warm_count
+  avg_sentiment_score (30d), comm_frequency_growth_ratio,
+  revenue_30d, ctr_trend_pct, relationship_warm_count, status_encoded
 
 ---
 
@@ -225,7 +234,7 @@ docker-compose up -d          # start PostgreSQL + ChromaDB
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 python src/ingestion/etl_pipeline.py   # seed mock data
-uvicorn src.api.main:app --reload      # start API on :8000
+uvicorn src.api.main:app --reload --port 8080  # start API on :8080
 ```
 
 ---

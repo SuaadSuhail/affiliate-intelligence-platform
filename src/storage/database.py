@@ -10,13 +10,17 @@ Creates a SQLAlchemy engine with connection pooling and exposes:
                           message if PostgreSQL is not reachable
 """
 
+import logging
 import os
+from contextlib import contextmanager
 from typing import Generator
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker, Session
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -93,3 +97,49 @@ def create_all_tables() -> None:
             f"        and then retry.\n"
         )
         raise
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+
+def health_check() -> bool:
+    """Check if database connection is healthy.
+    Returns True if connected, False otherwise."""
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        return True
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        return False
+
+
+# ── Context-manager session (for scripts and agent tools) ─────────────────────
+
+@contextmanager
+def db_session() -> Generator[Session, None, None]:
+    """
+    Context-manager session for use outside FastAPI (ETL scripts, agent tools).
+
+    Automatically commits on success and rolls back on any exception.
+
+    Usage:
+        with db_session() as db:
+            db.add(Affiliate(name="Alice"))
+    """
+    db: Session = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+# ── Backward-compat alias ─────────────────────────────────────────────────────
+
+#: Alias kept so that etl_pipeline.py and other scripts written against the
+#: original scaffold continue to work without modification.
+init_db = create_all_tables

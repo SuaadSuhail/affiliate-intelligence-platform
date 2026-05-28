@@ -209,6 +209,20 @@ def get_by_affiliate(affiliate_id: str, limit: int = 20) -> list[dict]:
     return results
 
 
+def health_check() -> bool:
+    """
+    Return True if ChromaDB is reachable, False otherwise.
+
+    Used by the /health endpoint to report ChromaDB status without
+    raising an exception.
+    """
+    try:
+        _get_collection()  # triggers connection + heartbeat on first call
+        return True
+    except Exception:
+        return False
+
+
 def delete_by_affiliate(affiliate_id: str) -> None:
     """
     Remove all documents belonging to one affiliate.

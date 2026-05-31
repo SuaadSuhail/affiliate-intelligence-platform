@@ -13,7 +13,6 @@ import os
 from typing import Optional
 
 import chromadb
-from chromadb.config import Settings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,15 +26,8 @@ PROFILE_COLLECTION = "affiliate_profiles"
 
 
 def _get_client() -> chromadb.HttpClient:
-    """Return an authenticated ChromaDB HTTP client."""
-    return chromadb.HttpClient(
-        host=CHROMA_HOST,
-        port=CHROMA_PORT,
-        settings=Settings(
-            chroma_client_auth_provider="chromadb.auth.token.TokenAuthClientProvider",
-            chroma_client_auth_credentials=CHROMA_TOKEN,
-        ),
-    )
+    """Return a ChromaDB HTTP client."""
+    return chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
 
 
 class VectorStore:

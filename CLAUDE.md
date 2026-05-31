@@ -23,39 +23,63 @@ health_score = round(((1 - churn_risk_score) * 0.6 + growth_potential_score * 0.
 
 ---
 
-## 2. NLP Tags (20 total)
+## 2. NLP Tags (21 total)
 
-Each communication (email, call transcript, chat) is run through `nlp_processor.py`
-which assigns zero or more tags as a JSON list stored in `communications.tags`.
+Each communication is processed by `src/ingestion/nlp_processor.py`, which runs spaCy
+(`en_core_web_sm`) and a custom `SENTIMENT_LEXICON` to assign tags stored as a
+`TEXT[]` array in `communications.tags`.
 
-### Detection Method Key
+### Sentiment scoring
+Sentiment is **lexicon-based** (not VADER). `calculate_sentiment(text)` averages the
+scores of all SENTIMENT_LEXICON words found in the text. 40 words total: 20 negative
+(-0.3 to -0.9) and 20 positive (+0.3 to +0.9). Result clamped to [-1.0, +1.0].
+
+### Detection method key
 - **KW** = keyword/phrase matching on lowercased text
-- **RE** = regex pattern
-- **ML** = spaCy classifier or rule-based entity detection
-- **SENT** = sentiment score threshold from VADER/TextBlob
+- **ML** = spaCy NER entity matching
+- **SENT** = lexicon sentiment score threshold
+- **DB** = database lookup on the `affiliates` table
 
-| # | Tag | Detection | Trigger Condition |
-|---|---|---|---|
-| 1 | `churn_signal` | KW + SENT | Words: *cancel*, *leaving*, *switching*, *done with*, *closing account*, *move on*, *not working for us* + negative sentiment ≤ -0.4 |
-| 2 | `growth_intent` | KW | Words: *scale*, *expand*, *ramp up*, *increase volume*, *new campaign*, *bigger budget*, *double*, *grow*, *opportunity* |
-| 3 | `payment_issue` | KW + RE | Words: *payment*, *commission*, *invoice*, *not received*, *missing*, *delayed*, *discrepancy*; amount regex `\$[\d,]+` present |
-| 4 | `technical_issue` | KW | Words: *bug*, *broken*, *error*, *not working*, *tracking issue*, *pixel*, *postback*, *API down*, *integration fail* |
-| 5 | `satisfaction_high` | SENT + KW | VADER compound ≥ 0.5 OR words: *love*, *excellent*, *amazing*, *best*, *great work*, *fantastic*, *thrilled* |
-| 6 | `satisfaction_low` | SENT + KW | VADER compound ≤ -0.3 OR words: *disappointed*, *frustrated*, *unhappy*, *poor*, *terrible*, *waste of time* |
-| 7 | `competitor_mention` | KW | Named competitors: *Commission Junction*, *ShareASale*, *Impact*, *Awin*, *Rakuten*, *PartnerStack*, *Partnerize*, plus generic: *competitor*, *other network*, *your rival* |
-| 8 | `escalation_risk` | KW + SENT | Words: *manager*, *escalate*, *legal*, *lawyer*, *report*, *complain*, *BBB*, *sue*, *formal complaint* + negative sentiment |
-| 9 | `support_request` | KW | Words: *help*, *question*, *how do I*, *can you assist*, *need support*, *ticket*, *not sure how*, *please advise* |
-| 10 | `feature_request` | KW | Words: *feature*, *wish*, *would be great if*, *can you add*, *missing functionality*, *request*, *suggestion*, *enhancement* |
-| 11 | `pricing_concern` | KW + RE | Words: *commission rate*, *payout*, *low rate*, *lower than*, *not worth it*, *increase my rate*, *better terms*; percentage regex `\d+%` |
-| 12 | `fraud_risk` | KW + RE | Words: *fake*, *bot traffic*, *proxy*, *VPN*, *refund spike*, *chargeback*, *suspicious*, *invalid clicks*; IP regex present |
-| 13 | `high_engagement` | ML | Communication frequency > 2 per week OR response time < 4 hours (computed at feature engineering stage, tag set retroactively) |
-| 14 | `low_engagement` | ML | No communication for 14+ days OR single-word replies (computed at feature engineering stage) |
-| 15 | `compliance_issue` | KW | Words: *policy violation*, *terms of service*, *TOS*, *prohibited*, *not allowed*, *ban*, *trademark*, *brand bidding* |
-| 16 | `new_opportunity` | KW | Words: *new traffic source*, *new channel*, *partnership*, *collab*, *new audience*, *influencer*, *podcast*, *newsletter*, *social media push* |
-| 17 | `seasonal_pattern` | KW + RE | Words: *Black Friday*, *Cyber Monday*, *Q4*, *holiday season*, *summer sale*, *back to school*, *Christmas*, *BFCM*; month/quarter regex |
-| 18 | `relationship_warm` | SENT + KW | VADER compound ≥ 0.3 AND words: *thanks*, *appreciate*, *great chatting*, *always a pleasure*, *looking forward*, *enjoyed our call*, *cheers* |
-| 19 | `urgency` | KW + RE | Words: *urgent*, *ASAP*, *immediately*, *right away*, *by end of day*, *today*, *deadline*; exclamation marks ≥ 2 |
-| 20 | `question_asked` | RE | Sentence ending with `?` OR words: *can you*, *could you*, *would you*, *do you know*, *is there a way* |
+### ENGAGEMENT group
+
+| Tag | Detection | Trigger Condition |
+|---|---|---|
+| `responsive` | KW + SENT | `source = email` AND `sentiment_score > 0.1` |
+| `proactive_outreach` | KW | *just wanted to reach out*, *checking in*, *wanted to share*, *thought you'd like to know* |
+| `campaign_active` | KW | *live*, *launched*, *running*, *went live*, *campaign is active*, *pushing the campaign* |
+| `unresponsive` | DB | `affiliates.days_since_contact > 5` |
+| `disengaged_tone` | KW + SENT | *slow*, *quiet*, *not much happening*, *haven't been able*, *things are slow*, *been quiet* AND `sentiment < -0.2` |
+| `gone_silent` | DB | `affiliates.days_since_contact > 14` |
+
+### SENTIMENT group
+
+| Tag | Detection | Trigger Condition |
+|---|---|---|
+| `positive_sentiment` | SENT | `sentiment_score > 0.3` |
+| `enthusiastic` | SENT + KW | `sentiment_score > 0.6` OR *excited*, *thrilled*, *can't wait*, *love this*, *amazing* |
+| `neutral_sentiment` | SENT | `-0.2 ≤ sentiment_score ≤ 0.3` |
+| `frustrated` | SENT + KW | `sentiment_score < -0.4` OR *frustrated*, *disappointing*, *not working*, *let down*, *expected better* |
+| `complaint` | KW | *complaint*, *unacceptable*, *not acceptable*, *raising a complaint*, *formally complain* |
+
+### INTENT group
+
+| Tag | Detection | Trigger Condition |
+|---|---|---|
+| `upsell_signal` | KW | *new product*, *can we add*, *interested in*, *another brand*, *additional* |
+| `expansion_interest` | KW | *scale*, *grow*, *more volume*, *increase*, *bigger*, *expand* |
+| `new_campaign_intent` | KW | *new campaign*, *launch*, *plan to run*, *ready to start*, *want to start* |
+| `churn_signal` | KW | *leaving*, *switching*, *cancelling*, *stopping*, *moving to*, *other platform*, *looking elsewhere* |
+| `competitor_mention` | ML + KW | spaCy NER ORG entities + keyword list: *awin*, *rakuten*, *impact*, *cj affiliate*, *partnerize*, *tradedoubler*, *webgains* |
+| `stalled_deal` | KW + SENT | *still waiting*, *no update*, *heard nothing*, *no response*, *chasing* AND `sentiment < 0.0` |
+
+### RELATIONSHIP group
+
+| Tag | Detection | Trigger Condition |
+|---|---|---|
+| `escalation` | KW | *escalate*, *speak to manager*, *your manager*, *senior*, *urgent*, *asap*, *immediately* OR (`frustrated` AND `complaint` both present) |
+| `follow_up_needed` | KW | *let me know*, *waiting to hear*, *please confirm*, *can you*, *could you*, *please check*, *get back to me* |
+| `action_committed` | KW | *i will*, *we will*, *will send*, *will do*, *by end of*, *done by*, *will have it* |
+| `question_asked` | ML | Any sentence in `doc.sents` ends with `?` |
 
 ---
 
@@ -63,65 +87,59 @@ which assigns zero or more tags as a JSON list stored in `communications.tags`.
 
 Database: `affiliate_intelligence`
 
+> **Note:** The schema below reflects the **actual live database** (confirmed via
+> `sqlalchemy.inspect`). It differs from the original scaffold design — several
+> columns were renamed or restructured during the storage-layer build.
+
 ### 3.1 `affiliates`
 
 ```sql
 CREATE TABLE affiliates (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name            VARCHAR(255)   NOT NULL,
-    email           VARCHAR(255)   UNIQUE NOT NULL,
-    company         VARCHAR(255),
-    tier            VARCHAR(20)    NOT NULL DEFAULT 'bronze',   -- bronze | silver | gold | platinum
-    join_date       DATE           NOT NULL,
-    country         VARCHAR(100),
-    niche           VARCHAR(100),                               -- e.g. finance, travel, SaaS, e-commerce
-    traffic_source  VARCHAR(100),                               -- SEO | PPC | Social | Email | Influencer
-    monthly_revenue DECIMAL(12,2)  DEFAULT 0.00,               -- last full-month revenue generated
-    churn_risk_score     FLOAT     DEFAULT 0.50,               -- 0.0–1.0
-    growth_potential_score FLOAT   DEFAULT 0.50,               -- 0.0–1.0
-    health_score         FLOAT     DEFAULT 50.0,               -- 0–100
-    last_contact_date    TIMESTAMP,
-    created_at      TIMESTAMP      NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMP      NOT NULL DEFAULT NOW()
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                   VARCHAR(255)  NOT NULL,
+    status                 affiliate_status NOT NULL DEFAULT 'active',
+                           -- ENUM: active | at_risk | churned | high_growth
+    churn_risk_score       FLOAT         NOT NULL DEFAULT 0.50,   -- 0.0–1.0
+    growth_potential_score FLOAT         NOT NULL DEFAULT 0.50,   -- 0.0–1.0
+    health_score           FLOAT         NOT NULL DEFAULT 50.0,   -- 0–100
+    revenue_30d            NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+    ctr_trend_pct          FLOAT         NOT NULL DEFAULT 0.0,
+    last_contact_at        TIMESTAMPTZ,
+    days_since_contact     INTEGER       NOT NULL DEFAULT 0,
+    updated_at             TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 ```
 
-**Indexes:** `email`, `tier`, `churn_risk_score DESC`, `growth_potential_score DESC`
+**Indexes:** `status`, `churn_risk_score DESC`, `growth_potential_score DESC`
 
 ### 3.2 `communications`
 
 ```sql
 CREATE TABLE communications (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    affiliate_id    UUID           NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
-    channel         VARCHAR(20)    NOT NULL,   -- email | call | chat | ticket
-    direction       VARCHAR(10)    NOT NULL,   -- inbound | outbound
-    subject         VARCHAR(500),
-    content         TEXT           NOT NULL,
-    sentiment_score FLOAT,                     -- VADER compound: -1.0 to 1.0
-    sentiment_label VARCHAR(20),               -- positive | neutral | negative
-    tags            JSONB          NOT NULL DEFAULT '[]',
-    embedding_id    VARCHAR(255),              -- ChromaDB document ID reference
-    occurred_at     TIMESTAMP      NOT NULL,
-    created_at      TIMESTAMP      NOT NULL DEFAULT NOW()
+    affiliate_id    UUID             NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+    source          communication_source NOT NULL,
+                    -- ENUM: email | call | api_event
+    raw_text        TEXT             NOT NULL,
+    tags            VARCHAR[]        NOT NULL DEFAULT '{}',  -- TEXT ARRAY (not JSONB)
+    sentiment_score FLOAT            NOT NULL DEFAULT 0.0,  -- lexicon score: -1.0 to 1.0
+    embedding_id    VARCHAR(255),                           -- ChromaDB document ID
+    occurred_at     TIMESTAMPTZ      NOT NULL
 );
 ```
 
-**Indexes:** `affiliate_id`, `occurred_at DESC`, `channel`, GIN index on `tags`
+**Indexes:** `affiliate_id`, `occurred_at DESC`, `source`
 
 ### 3.3 `score_history`
 
 ```sql
 CREATE TABLE score_history (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    affiliate_id    UUID           NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
-    churn_risk_score      FLOAT    NOT NULL,
-    growth_potential_score FLOAT   NOT NULL,
-    health_score          FLOAT    NOT NULL,
-    features        JSONB          NOT NULL DEFAULT '{}',  -- raw feature vector snapshot
-    shap_values     JSONB          NOT NULL DEFAULT '{}',  -- {feature: shap_value} for explainability
-    model_version   VARCHAR(50)    NOT NULL DEFAULT '1.0.0',
-    scored_at       TIMESTAMP      NOT NULL DEFAULT NOW()
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    affiliate_id           UUID   NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+    churn_risk_score       FLOAT  NOT NULL,
+    growth_potential_score FLOAT  NOT NULL,
+    health_score           FLOAT  NOT NULL,
+    scored_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -200,15 +218,19 @@ Used for: finding similar affiliates, clustering, agent profile lookups.
 
 ## 7. API Endpoints (FastAPI)
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/affiliates` | List all affiliates with scores |
-| GET | `/affiliates/{id}` | Single affiliate with full score history |
-| GET | `/affiliates/{id}/communications` | Paginated communications |
-| POST | `/affiliates/{id}/score` | Trigger re-scoring |
-| POST | `/agent/chat` | Chat with the ReAct agent |
-| POST | `/ingest/csv` | Upload affiliates CSV |
-| GET | `/health` | Service health check |
+Run with: `uvicorn src.api.main:app --port 8080 --reload`
+
+| Method | Path | Tag | Description |
+|---|---|---|---|
+| GET | `/health` | System | Service health check |
+| GET | `/affiliates` | Affiliates | List all affiliates with scores (filterable by `status`) |
+| GET | `/affiliates/{id}` | Affiliates | Single affiliate with full score history |
+| GET | `/affiliates/{id}/communications` | Affiliates | Paginated communications for one affiliate |
+| POST | `/affiliates/{id}/score` | Scoring | Trigger re-scoring for a single affiliate |
+| POST | `/agent/chat` | Agent | Chat with the LangChain ReAct agent |
+| POST | `/process/nlp` | NLP | Run NLP tagging on all untagged communications |
+| GET | `/communications` | Communications | List all communications with tags + sentiment |
+| GET | `/communications/{id}` | Communications | Single communication by UUID |
 
 ---
 
@@ -222,10 +244,11 @@ See `.env.example` for all required variables. Never commit `.env`.
 
 ```bash
 docker-compose up -d          # start PostgreSQL + ChromaDB
-pip install -r requirements.txt
+conda activate affiliate-intelligence   # or: pip install -r requirements.txt
 python -m spacy download en_core_web_sm
-python src/ingestion/etl_pipeline.py   # seed mock data
-uvicorn src.api.main:app --reload      # start API on :8000
+python src/ingestion/etl_pipeline.py   # seed mock data (10 affiliates, 7 comms)
+uvicorn src.api.main:app --port 8080 --reload  # start API on :8080
+curl -X POST http://localhost:8080/process/nlp # tag all communications
 ```
 
 ---
@@ -270,3 +293,95 @@ feat(agent): add draft_email tool to LangChain agent
 - Never commit `.env` files
 - Never commit trained model `.pkl` or `.joblib` files
 - Never commit `chroma_db/` data folders
+
+---
+
+## 11. Built Modules
+
+### Storage layer
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **Files** | `src/storage/database.py`, `src/storage/models.py`, `src/storage/vector_store.py` |
+
+**What it does:**
+- `database.py` — creates the SQLAlchemy engine, `SessionLocal` factory, and FastAPI
+  `get_db()` dependency; exposes `db_session()` context manager for scripts
+- `models.py` — ORM models for `Affiliate`, `Communication`, `ScoreHistory` that match
+  the live DB schema (see § 3); uses `ARRAY(String)` for `tags`, `Enum` types for
+  `status` / `source`
+- `vector_store.py` — thin ChromaDB wrapper; manages `communications_embeddings` and
+  `affiliate_profiles` collections with cosine similarity; lazy HTTP client connection
+
+**Key functions:** `get_db()`, `db_session()`, `init_db()`, `health_check()`,
+`VectorStore.upsert_communication()`, `VectorStore.search_communications()`,
+`VectorStore.upsert_affiliate_profile()`, `VectorStore.find_similar_affiliates()`
+
+**Infrastructure fix:** Removed `chromadb.auth.token.TokenAuthClientProvider` from
+`_get_client()` — that module does not exist in chromadb ≥ 1.0. Client now connects
+without auth settings (token auth is configured at the ChromaDB server level via env).
+
+---
+
+### ETL pipeline
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **File** | `src/ingestion/etl_pipeline.py` |
+
+**What it does:** Reads the mock CSV and flat-text communication files from
+`data/mock/` and loads them into PostgreSQL with full upsert logic:
+- `run_affiliate_etl(db)` — reads `affiliates.csv` via Pandas; upserts by `name`;
+  parses `last_contact_at`, computes `days_since_contact`
+- `run_communications_etl(db)` — parses `[AFFILIATE: Name]` / `[DATE: ...]` header
+  blocks from `emails.txt` and `transcripts.txt`; links to affiliate by name;
+  upserts by `(affiliate_id, occurred_at)`; leaves `tags = []` and `embedding_id = None`
+- `run_full_etl(db)` — calls both jobs in a single transaction; commits on success,
+  rolls back on any failure
+
+**API endpoints:** `POST /ingest/full`, `POST /ingest/affiliates`,
+`POST /ingest/communications`
+
+**Output:** 10 affiliates + 7 communications in PostgreSQL after a clean run
+
+**Idempotent:** Re-running updates existing rows rather than duplicating them
+
+**Depends on:** Storage layer (must call `init_db()` before first run)
+
+---
+
+### NLP processor
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **File** | `src/ingestion/nlp_processor.py` |
+| **Tests** | `tests/test_nlp.py` — 6 tests, all passing |
+
+**What it does:** Reads all communications where `tags = []`, runs each through the
+spaCy pipeline and `SENTIMENT_LEXICON`, detects applicable tags, and writes
+`tags[]` and `sentiment_score` back to the `communications` table.
+
+**SENTIMENT_LEXICON:** 40 words — 20 negative (-0.3 to -0.9) covering churn /
+frustration signals; 20 positive (+0.3 to +0.9) covering growth / enthusiasm signals.
+Scoring = average of matched word scores, clamped to [-1.0, +1.0].
+
+**Key functions:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `calculate_sentiment` | `(text: str) -> float` | Lexicon-based sentiment score |
+| `detect_tags` | `(doc, sentiment_score, text_lower, source, affiliate_id, db) -> list[str]` | All 21 tag rules; no duplicates |
+| `process_single_communication` | `(comm: Communication, db: Session) -> dict` | Full pipeline for one record |
+| `process_all_communications` | `(db: Session) -> dict` | Bulk tags all untagged comms; returns summary |
+
+**API endpoints:** `POST /process/nlp`, `GET /communications`,
+`GET /communications/{id}`
+
+**Depends on:** Storage layer (models + DB session), ETL pipeline must run first to
+populate communications
+
+**Output:** `tags[]` and `sentiment_score` written to every `communications` row;
+7/7 communications tagged in the mock dataset

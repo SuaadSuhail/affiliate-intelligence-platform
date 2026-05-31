@@ -1,9 +1,5 @@
-===EMAIL_001===
-affiliate_id: aff-003
-channel: email
-direction: inbound
-occurred_at: 2026-05-19T09:14:00
-subject: Re: Q3 Campaign Planning — Scale-Up Proposal
+[AFFILIATE: Priya Sharma]
+[DATE: 2026-05-19T09:14:00]
 
 Hi team,
 
@@ -20,16 +16,9 @@ Thanks so much for all the support as always, it's always a pleasure working wit
 Best,
 Priya
 
----
-EXPECTED TAGS: growth_intent, new_opportunity, pricing_concern, seasonal_pattern, relationship_warm, question_asked, feature_request
 
-
-===EMAIL_002===
-affiliate_id: aff-008
-channel: email
-direction: inbound
-occurred_at: 2026-05-21T16:47:00
-subject: Serious issues — considering moving to another network
+[AFFILIATE: Tom Bauer]
+[DATE: 2026-05-21T16:47:00]
 
 Hi,
 
@@ -43,16 +32,9 @@ I need a response today — this is urgent!!
 
 Tom Bauer
 
----
-EXPECTED TAGS: churn_signal, payment_issue, technical_issue, competitor_mention, escalation_risk, satisfaction_low, urgency, question_asked
 
-
-===EMAIL_003===
-affiliate_id: aff-001
-channel: email
-direction: outbound
-occurred_at: 2026-05-20T11:30:00
-subject: Your Q2 Results + Black Friday Early Access
+[AFFILIATE: Sarah Chen]
+[DATE: 2026-05-20T11:30:00]
 
 Hi Sarah,
 
@@ -67,16 +49,9 @@ Looking forward to hearing from you!
 Warm regards,
 Alex — Partner Success Team
 
----
-EXPECTED TAGS: satisfaction_high, seasonal_pattern, new_opportunity, growth_intent, relationship_warm, question_asked
 
-
-===EMAIL_004===
-affiliate_id: aff-004
-channel: email
-direction: inbound
-occurred_at: 2026-04-28T08:22:00
-subject: Potential policy violation query + account question
+[AFFILIATE: James O'Brien]
+[DATE: 2026-04-28T08:22:00]
 
 Hi Support,
 
@@ -91,16 +66,9 @@ Can you please advise on both points? I'm quite new to the platform (joined in J
 Thanks,
 James
 
----
-EXPECTED TAGS: compliance_issue, fraud_risk, support_request, question_asked, technical_issue
 
-
-===EMAIL_005===
-affiliate_id: aff-006
-channel: email
-direction: inbound
-occurred_at: 2026-05-14T14:05:00
-subject: Feature suggestion + quick question about reporting
+[AFFILIATE: Carlos Mendez]
+[DATE: 2026-05-14T14:05:00]
 
 Hey,
 
@@ -116,6 +84,3 @@ Looking forward to hearing your thoughts, always appreciate the quick responses!
 
 Cheers,
 Carlos
-
----
-EXPECTED TAGS: satisfaction_high, feature_request, support_request, question_asked, relationship_warm, new_opportunity

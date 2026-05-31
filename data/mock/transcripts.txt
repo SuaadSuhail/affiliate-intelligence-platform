@@ -1,10 +1,5 @@
-===TRANSCRIPT_001===
-affiliate_id: aff-002
-channel: call
-direction: inbound
-occurred_at: 2026-05-08T15:00:00
-duration_minutes: 24
-subject: Account review call — Marcus Williams / Performance Plus
+[AFFILIATE: Marcus Williams]
+[DATE: 2026-05-08T15:00:00]
 
 [CALL BEGINS]
 
@@ -38,17 +33,9 @@ MARCUS: Appreciate it. Let's see how the next couple of weeks go.
 
 [CALL ENDS]
 
----
-EXPECTED TAGS: churn_signal, payment_issue, technical_issue, competitor_mention, satisfaction_low, pricing_concern, support_request, relationship_warm, urgency, question_asked
 
-
-===TRANSCRIPT_002===
-affiliate_id: aff-010
-channel: call
-direction: outbound
-occurred_at: 2026-05-22T10:30:00
-duration_minutes: 31
-subject: Quarterly business review — Rachel Torres / Sunset Affiliates Co
+[AFFILIATE: Rachel Torres]
+[DATE: 2026-05-22T10:30:00]
 
 [CALL BEGINS]
 
@@ -81,6 +68,3 @@ AGENT: Consider it done. I'll get the BFCM planning doc started and share it wit
 RACHEL: Absolutely! Really looking forward to it. Thanks so much for everything, Jordan.
 
 [CALL ENDS]
-
----
-EXPECTED TAGS: growth_intent, new_opportunity, satisfaction_high, relationship_warm, seasonal_pattern, competitor_mention, feature_request, high_engagement, question_asked

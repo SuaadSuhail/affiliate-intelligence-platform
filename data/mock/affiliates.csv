@@ -1,11 +1,11 @@
-id,name,email,company,tier,join_date,country,niche,traffic_source,revenue_30d,ctr_trend_pct,churn_risk_score,growth_potential_score,health_score,status,last_contact_at
-aff-001,Sarah Chen,sarah.chen@brightleadsmedia.com,Bright Leads Media,gold,2022-03-15,United States,finance,SEO,18450.00,2.4,0.18,0.82,72.4,active,2026-05-20
-aff-002,Marcus Williams,m.williams@performanceplus.io,Performance Plus,silver,2023-07-01,United Kingdom,e-commerce,PPC,6200.00,-1.8,0.61,0.31,37.0,at_risk,2026-05-08
-aff-003,Priya Sharma,priya@clickhubnetwork.com,ClickHub Network,platinum,2021-11-22,India,SaaS,Influencer,42100.00,5.1,0.09,0.91,85.0,high_growth,2026-05-21
-aff-004,James O'Brien,jobs@dublindigital.ie,Dublin Digital,bronze,2024-01-10,Ireland,travel,Social,1850.00,-0.5,0.74,0.22,27.2,at_risk,2026-04-28
-aff-005,Aiko Tanaka,aiko.tanaka@tanaka-affiliates.jp,Tanaka Affiliates,gold,2022-08-05,Japan,gaming,Email,21300.00,1.2,0.22,0.67,64.0,active,2026-05-18
-aff-006,Carlos Mendez,carlos@trafficbridgeco.mx,TrafficBridge Co,silver,2023-03-19,Mexico,health & wellness,Social,9750.00,0.8,0.45,0.55,51.0,active,2026-05-14
-aff-007,Fatima Al-Hassan,fatima@crescentclicks.ae,Crescent Clicks,gold,2022-06-30,UAE,finance,SEO,16800.00,1.9,0.29,0.73,63.0,active,2026-05-19
-aff-008,Tom Bauer,tbauer@bauer-digital.de,Bauer Digital GmbH,bronze,2024-09-02,Germany,e-commerce,PPC,980.00,-4.2,0.88,0.12,14.4,churned,2026-04-10
-aff-009,Nkechi Okonkwo,nkechi@lagosgrowthlab.ng,Lagos Growth Lab,silver,2023-11-15,Nigeria,education,Social,5400.00,0.3,0.38,0.60,52.8,active,2026-05-16
-aff-010,Rachel Torres,rachel.t@sunsetaffiliatesco.com,Sunset Affiliates Co,platinum,2020-05-08,United States,lifestyle,Email,58900.00,3.7,0.05,0.88,87.2,high_growth,2026-05-22
+id,name,email,company,tier,join_date,country,niche,traffic_source,revenue_30d,ctr_trend_pct,churn_risk_score,growth_potential_score,health_score,status,last_contact_at,days_since_contact
+aff-001,Sarah Chen,sarah.chen@brightleadsmedia.com,Bright Leads Media,gold,2022-03-15,United States,finance,SEO,18450.00,2.4,0.18,0.82,72.4,active,2026-05-20,11
+aff-002,Marcus Williams,m.williams@performanceplus.io,Performance Plus,silver,2023-07-01,United Kingdom,e-commerce,PPC,6200.00,-1.8,0.61,0.31,37.0,at_risk,2026-05-08,23
+aff-003,Priya Sharma,priya@clickhubnetwork.com,ClickHub Network,platinum,2021-11-22,India,SaaS,Influencer,42100.00,5.1,0.09,0.91,85.0,high_growth,2026-05-21,10
+aff-004,James O'Brien,jobs@dublindigital.ie,Dublin Digital,bronze,2024-01-10,Ireland,travel,Social,1850.00,-0.5,0.74,0.22,27.2,at_risk,2026-04-28,33
+aff-005,Aiko Tanaka,aiko.tanaka@tanaka-affiliates.jp,Tanaka Affiliates,gold,2022-08-05,Japan,gaming,Email,21300.00,1.2,0.22,0.67,64.0,active,2026-05-18,13
+aff-006,Carlos Mendez,carlos@trafficbridgeco.mx,TrafficBridge Co,silver,2023-03-19,Mexico,health & wellness,Social,9750.00,0.8,0.45,0.55,51.0,active,2026-05-14,17
+aff-007,Fatima Al-Hassan,fatima@crescentclicks.ae,Crescent Clicks,gold,2022-06-30,UAE,finance,SEO,16800.00,1.9,0.29,0.73,63.0,active,2026-05-19,12
+aff-008,Tom Bauer,tbauer@bauer-digital.de,Bauer Digital GmbH,bronze,2024-09-02,Germany,e-commerce,PPC,980.00,-4.2,0.88,0.12,14.4,churned,2026-04-10,51
+aff-009,Nkechi Okonkwo,nkechi@lagosgrowthlab.ng,Lagos Growth Lab,silver,2023-11-15,Nigeria,education,Social,5400.00,0.3,0.38,0.60,52.8,active,2026-05-16,15
+aff-010,Rachel Torres,rachel.t@sunsetaffiliatesco.com,Sunset Affiliates Co,platinum,2020-05-08,United States,lifestyle,Email,58900.00,3.7,0.05,0.88,87.2,high_growth,2026-05-22,9

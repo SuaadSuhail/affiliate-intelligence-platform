@@ -326,6 +326,63 @@ def agent_chat(request: ChatRequest) -> ChatResponse:
 
 # ─── Ingestion ────────────────────────────────────────────────────────────────
 
+@app.post("/ingest/full", tags=["Ingestion"])
+def ingest_full(db: Session = Depends(get_db)) -> dict:
+    """
+    Run the full ETL pipeline: load affiliates from CSV then communications
+    from emails.txt and transcripts.txt.  The entire operation is atomic —
+    either both jobs commit or the whole transaction is rolled back.
+
+    Returns a summary of records created / updated for both jobs.
+    """
+    from src.ingestion.etl_pipeline import run_full_etl
+
+    try:
+        return run_full_etl(db)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+
+
+@app.post("/ingest/affiliates", tags=["Ingestion"])
+def ingest_affiliates_only(db: Session = Depends(get_db)) -> dict:
+    """
+    Run Job 1 only: load affiliates from data/mock/affiliates.csv.
+    Upserts by name — safe to run multiple times.
+    """
+    from src.ingestion.etl_pipeline import run_affiliate_etl
+
+    try:
+        result = run_affiliate_etl(db)
+        db.commit()
+        return result
+    except FileNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+
+
+@app.post("/ingest/communications", tags=["Ingestion"])
+def ingest_communications_only(db: Session = Depends(get_db)) -> dict:
+    """
+    Run Job 2 only: load communications from emails.txt and transcripts.txt.
+    Upserts by (affiliate_id, occurred_at) — safe to run multiple times.
+    Affiliates must already exist before calling this endpoint.
+    """
+    from src.ingestion.etl_pipeline import run_communications_etl
+
+    try:
+        result = run_communications_etl(db)
+        db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+
+
 @app.post("/ingest/csv", tags=["Ingestion"])
 async def ingest_csv(file: UploadFile = File(...)) -> dict:
     """

@@ -11,11 +11,9 @@ POST /process/full       — NLP + embeddings end-to-end (idempotent)
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.storage.database import get_db
-from src.storage.models import Communication
 
 router = APIRouter()
 
@@ -27,35 +25,15 @@ def run_nlp(db: Session = Depends(get_db)) -> dict:
     """
     Run NLP tagging on all untagged communications.
 
-    Queries every Communication where tags = [], applies keyword/sentiment
-    detection via process_text(), and writes tags + sentiment back to PostgreSQL.
+    Delegates to process_all_communications() which queries every Communication
+    where tags = [], runs the spaCy pipeline, and writes tags + sentiment back
+    to PostgreSQL.
     """
-    from src.ingestion.nlp_processor import process_text
+    from src.ingestion.nlp_processor import process_all_communications
 
-    untagged = (
-        db.query(Communication)
-        .filter(func.jsonb_array_length(Communication.tags) == 0)
-        .all()
-    )
-
-    processed = 0
-    tag_summary: dict[str, int] = {}
-
-    for comm in untagged:
-        result = process_text(comm.content or "")
-        comm.tags = result.tags
-        comm.sentiment_score = result.sentiment_score
-        comm.sentiment_label = result.sentiment_label
-        processed += 1
-        for tag in result.tags:
-            tag_summary[tag] = tag_summary.get(tag, 0) + 1
-
+    result = process_all_communications(db)
     db.commit()
-    return {
-        "total_processed": processed,
-        "total_tagged": sum(1 for c in untagged if c.tags),
-        "tag_summary": tag_summary,
-    }
+    return result
 
 
 # ─── Embeddings ───────────────────────────────────────────────────────────────
@@ -65,48 +43,15 @@ def run_embeddings(db: Session = Depends(get_db)) -> dict:
     """
     Generate embeddings for all communications that have no embedding_id yet.
 
-    Chunks each communication's content, encodes with all-MiniLM-L6-v2,
-    stores in ChromaDB, and writes the doc_id to communications.embedding_id.
+    Delegates to embed_all_communications() which chunks each communication's
+    raw_text, encodes with all-MiniLM-L6-v2, stores in ChromaDB, and writes
+    the first chunk doc_id to communications.embedding_id.
     """
-    from src.ingestion.embedding_generator import get_generator
+    from src.ingestion.embedding_generator import embed_all_communications, vector_store
 
-    already_embedded = (
-        db.query(Communication)
-        .filter(Communication.embedding_id.isnot(None))
-        .count()
-    )
-    unembedded = (
-        db.query(Communication)
-        .filter(Communication.embedding_id.is_(None))
-        .all()
-    )
-
-    gen = get_generator()
-    total_embedded = 0
-
-    for comm in unembedded:
-        try:
-            doc_id = gen.index_communication(
-                comm_id=str(comm.id),
-                content=comm.content or "",
-                affiliate_id=str(comm.affiliate_id),
-                channel=comm.channel,
-                direction=comm.direction,
-                sentiment_label=comm.sentiment_label or "neutral",
-                tags=comm.tags or [],
-                occurred_at=comm.occurred_at.isoformat() if comm.occurred_at else "",
-            )
-            comm.embedding_id = doc_id
-            total_embedded += 1
-        except Exception as exc:
-            print(f"[process/embeddings] Skipping comm {comm.id}: {exc}")
-
+    result = embed_all_communications(db, vector_store)
     db.commit()
-    return {
-        "total_processed": total_embedded,
-        "already_embedded": already_embedded,
-        "errors": len(unembedded) - total_embedded,
-    }
+    return result
 
 
 # ─── Full pipeline ────────────────────────────────────────────────────────────
@@ -119,8 +64,8 @@ def run_full(db: Session = Depends(get_db)) -> dict:
     Order: ETL (optional) → NLP tagging → Embeddings.
     Each step is idempotent — only unprocessed records are touched.
     """
-    from src.ingestion.nlp_processor import process_text
-    from src.ingestion.embedding_generator import get_generator
+    from src.ingestion.nlp_processor import process_all_communications
+    from src.ingestion.embedding_generator import embed_all_communications, vector_store
 
     # Step 1 — ETL (optional, catches import/runtime errors gracefully)
     etl_result: dict = {"status": "skipped"}
@@ -133,63 +78,15 @@ def run_full(db: Session = Depends(get_db)) -> dict:
         etl_result = {"status": "error", "detail": str(exc)}
 
     # Step 2 — NLP
-    untagged = (
-        db.query(Communication)
-        .filter(func.jsonb_array_length(Communication.tags) == 0)
-        .all()
-    )
-    tag_summary: dict[str, int] = {}
-    for comm in untagged:
-        result = process_text(comm.content or "")
-        comm.tags = result.tags
-        comm.sentiment_score = result.sentiment_score
-        comm.sentiment_label = result.sentiment_label
-        for tag in result.tags:
-            tag_summary[tag] = tag_summary.get(tag, 0) + 1
+    nlp_result = process_all_communications(db)
     db.commit()
 
-    nlp_result = {
-        "total_processed": len(untagged),
-        "total_tagged": sum(1 for c in untagged if c.tags),
-        "tag_summary": tag_summary,
-    }
-
     # Step 3 — Embeddings
-    already_embedded = (
-        db.query(Communication)
-        .filter(Communication.embedding_id.isnot(None))
-        .count()
-    )
-    unembedded = (
-        db.query(Communication)
-        .filter(Communication.embedding_id.is_(None))
-        .all()
-    )
-    gen = get_generator()
-    total_embedded = 0
-    for comm in unembedded:
-        try:
-            doc_id = gen.index_communication(
-                comm_id=str(comm.id),
-                content=comm.content or "",
-                affiliate_id=str(comm.affiliate_id),
-                channel=comm.channel,
-                direction=comm.direction,
-                sentiment_label=comm.sentiment_label or "neutral",
-                tags=comm.tags or [],
-                occurred_at=comm.occurred_at.isoformat() if comm.occurred_at else "",
-            )
-            comm.embedding_id = doc_id
-            total_embedded += 1
-        except Exception as exc:
-            print(f"[process/full] Embedding error for {comm.id}: {exc}")
+    emb_result = embed_all_communications(db, vector_store)
     db.commit()
 
     return {
         "etl": etl_result,
         "nlp": nlp_result,
-        "embeddings": {
-            "total_processed": total_embedded,
-            "already_embedded": already_embedded,
-        },
+        "embeddings": emb_result,
     }

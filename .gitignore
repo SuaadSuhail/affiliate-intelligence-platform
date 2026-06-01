@@ -31,3 +31,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+models/*.json
+models/*.pkl
+models/*.joblib

@@ -1,20 +1,14 @@
 """
 Feature Engineering
 ===================
-Builds the feature DataFrame used by both the churn and growth models.
-
-Each row = one affiliate. Features are aggregated from:
-  - affiliates table  (static profile features)
-  - communications table  (tag counts, sentiment aggregates, recency)
+Builds a 12-feature vector for each affiliate from PostgreSQL data.
 
 Feature groups
 --------------
-Profile      : tier_encoded, days_since_join, monthly_revenue
-Recency      : days_since_last_contact
-Sentiment    : avg_sentiment_30d, avg_sentiment_all, negative_ratio
-Tag counts   : one column per NLP tag (30-day window + all-time)
-Engagement   : comm_frequency_30d, comm_frequency_prev_30d,
-               comm_frequency_change_ratio
+Activity    : days_since_contact, revenue_30d, ctr_trend_pct
+Communication: avg_sentiment_30d, comm_count_30d, churn_signal_count,
+               positive_signal_count, escalation_count, competitor_mention_count
+Derived     : sentiment_trend, response_rate, days_since_positive
 """
 
 from __future__ import annotations
@@ -22,203 +16,213 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from src.storage.database import db_session
 from src.storage.models import Affiliate, Communication
-from src.ingestion.nlp_processor import ALL_TAGS
 
-# ─── Tier encoding ────────────────────────────────────────────────────────────
-TIER_MAP = {"bronze": 1, "silver": 2, "gold": 3, "platinum": 4}
+# ─── Feature names in fixed order ────────────────────────────────────────────
 
-# ─── Reference date (override in tests) ──────────────────────────────────────
-_NOW: Optional[datetime] = None
+FEATURE_NAMES: list[str] = [
+    # Activity
+    "days_since_contact",
+    "revenue_30d",
+    "ctr_trend_pct",
+    # Communication (30-day window)
+    "avg_sentiment_30d",
+    "comm_count_30d",
+    "churn_signal_count",
+    "positive_signal_count",
+    "escalation_count",
+    "competitor_mention_count",
+    # Derived
+    "sentiment_trend",
+    "response_rate",
+    "days_since_positive",
+]
+
+_POSITIVE_TAGS = {"enthusiastic", "positive_sentiment", "expansion_interest"}
 
 
 def _now() -> datetime:
-    if _NOW is not None:
-        return _NOW
     return datetime.now(timezone.utc)
 
 
-# ─── Core builder ─────────────────────────────────────────────────────────────
-
-def build_features(
-    affiliate_ids: Optional[list[str]] = None,
-    db: Optional[Session] = None,
-) -> pd.DataFrame:
-    """
-    Build a feature DataFrame.
-
-    Parameters
-    ----------
-    affiliate_ids : optional filter; if None, processes all affiliates
-    db            : optional existing Session; if None opens its own
-
-    Returns
-    -------
-    pd.DataFrame with one row per affiliate and columns:
-        affiliate_id, + all feature columns (no target columns)
-    """
-
-    def _build(session: Session) -> pd.DataFrame:
-        query = session.query(Affiliate)
-        if affiliate_ids:
-            query = query.filter(Affiliate.id.in_(affiliate_ids))
-        affiliates = query.all()
-
-        rows = []
-        now = _now()
-        window_30d = now - timedelta(days=30)
-        window_60d = now - timedelta(days=60)
-
-        for aff in affiliates:
-            comms = (
-                session.query(Communication)
-                .filter(Communication.affiliate_id == aff.id)
-                .all()
-            )
-
-            # ── Profile features ──────────────────────────────────────────────
-            days_since_join = max(0, (now.date() - aff.join_date).days)
-            tier_encoded = TIER_MAP.get(aff.tier, 1)
-
-            # ── Recency ───────────────────────────────────────────────────────
-            if aff.last_contact_date:
-                lc = aff.last_contact_date
-                if lc.tzinfo is None:
-                    lc = lc.replace(tzinfo=timezone.utc)
-                days_since_last_contact = max(0, (now - lc).days)
-            else:
-                days_since_last_contact = days_since_join
-
-            # ── Sentiment aggregates ──────────────────────────────────────────
-            recent_comms = [
-                c for c in comms
-                if c.occurred_at and _make_aware(c.occurred_at) >= window_30d
-            ]
-            sentiments_30d = [
-                c.sentiment_score for c in recent_comms if c.sentiment_score is not None
-            ]
-            sentiments_all = [
-                c.sentiment_score for c in comms if c.sentiment_score is not None
-            ]
-            avg_sentiment_30d = float(np.mean(sentiments_30d)) if sentiments_30d else 0.0
-            avg_sentiment_all = float(np.mean(sentiments_all)) if sentiments_all else 0.0
-            negative_ratio = (
-                sum(1 for s in sentiments_all if s <= -0.05) / len(sentiments_all)
-                if sentiments_all else 0.0
-            )
-
-            # ── Tag counts (all-time) ─────────────────────────────────────────
-            tag_counts_all: dict[str, int] = {f"tag_{t}": 0 for t in ALL_TAGS}
-            for comm in comms:
-                for tag in (comm.tags or []):
-                    key = f"tag_{tag}"
-                    if key in tag_counts_all:
-                        tag_counts_all[key] += 1
-
-            # ── Tag counts (30-day window) ────────────────────────────────────
-            tag_counts_30d: dict[str, int] = {f"tag30_{t}": 0 for t in ALL_TAGS}
-            for comm in recent_comms:
-                for tag in (comm.tags or []):
-                    key = f"tag30_{tag}"
-                    if key in tag_counts_30d:
-                        tag_counts_30d[key] += 1
-
-            # ── Communication frequency ───────────────────────────────────────
-            comms_30d = len(recent_comms)
-            comms_prev_30d = len([
-                c for c in comms
-                if c.occurred_at
-                and window_60d <= _make_aware(c.occurred_at) < window_30d
-            ])
-            freq_change_ratio = (
-                (comms_30d - comms_prev_30d) / max(comms_prev_30d, 1)
-            )
-
-            row = {
-                "affiliate_id": str(aff.id),
-                # Profile
-                "tier_encoded": tier_encoded,
-                "days_since_join": days_since_join,
-                "monthly_revenue": aff.monthly_revenue or 0.0,
-                # Recency
-                "days_since_last_contact": days_since_last_contact,
-                # Sentiment
-                "avg_sentiment_30d": round(avg_sentiment_30d, 4),
-                "avg_sentiment_all": round(avg_sentiment_all, 4),
-                "negative_ratio": round(negative_ratio, 4),
-                # Engagement
-                "comms_30d": comms_30d,
-                "comms_prev_30d": comms_prev_30d,
-                "freq_change_ratio": round(freq_change_ratio, 4),
-                # Tag counts (all-time)
-                **tag_counts_all,
-                # Tag counts (30d)
-                **tag_counts_30d,
-            }
-            rows.append(row)
-
-        return pd.DataFrame(rows)
-
-    if db is not None:
-        return _build(db)
-    with db_session() as session:
-        return _build(session)
-
-
 def _make_aware(dt: datetime) -> datetime:
-    """Ensure datetime is timezone-aware (UTC)."""
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
 
-def feature_columns() -> list[str]:
-    """Return the ordered list of feature column names (excludes affiliate_id)."""
-    base = [
-        "tier_encoded", "days_since_join", "monthly_revenue",
-        "days_since_last_contact",
-        "avg_sentiment_30d", "avg_sentiment_all", "negative_ratio",
-        "comms_30d", "comms_prev_30d", "freq_change_ratio",
-    ]
-    tag_all = [f"tag_{t}" for t in ALL_TAGS]
-    tag_30d = [f"tag30_{t}" for t in ALL_TAGS]
-    return base + tag_all + tag_30d
+def _derive_status(aff: Affiliate) -> str:
+    """Derive a status label from existing score columns."""
+    if (aff.churn_risk_score or 0.0) > 0.7:
+        return "at_risk"
+    if (aff.growth_potential_score or 0.0) > 0.7:
+        return "high_growth"
+    return "active"
 
 
-# ─── Synthetic label generation (for training on mock data) ───────────────────
+# ─── Core feature builder ─────────────────────────────────────────────────────
 
-def generate_synthetic_labels(df: pd.DataFrame) -> pd.DataFrame:
+def build_feature_vector(affiliate_id: str, db: Session) -> dict:
     """
-    Create synthetic churn and growth labels for training on mock data.
+    Build a feature vector for one affiliate.
 
-    Rule-based heuristic (replace with real labelled data in production):
-      churn_label  = 1 if churn_risk_score in DB > 0.55 else 0
-      growth_label = 1 if growth_potential_score in DB > 0.55 else 0
+    Parameters
+    ----------
+    affiliate_id : UUID string
+    db           : active SQLAlchemy session
 
-    We pull these from the DB since mock CSV already has plausible scores.
+    Returns
+    -------
+    Dict with keys: affiliate_id, affiliate_name, status, + all 12 FEATURE_NAMES.
     """
-    with db_session() as session:
-        affiliates = {
-            str(a.id): a for a in session.query(Affiliate).all()
+    import uuid
+    aff = db.query(Affiliate).filter(Affiliate.id == uuid.UUID(affiliate_id)).first()
+    if aff is None:
+        return {
+            "affiliate_id": affiliate_id,
+            "affiliate_name": "Unknown",
+            "status": "active",
+            **{f: 0.0 for f in FEATURE_NAMES},
         }
 
-    df = df.copy()
-    df["churn_label"] = df["affiliate_id"].apply(
-        lambda aid: int(affiliates[aid].churn_risk_score > 0.55) if aid in affiliates else 0
+    now = _now()
+    cutoff_30d = now - timedelta(days=30)
+    cutoff_15d = now - timedelta(days=15)
+
+    # All communications for this affiliate
+    all_comms = (
+        db.query(Communication)
+        .filter(Communication.affiliate_id == aff.id)
+        .all()
     )
-    df["growth_label"] = df["affiliate_id"].apply(
-        lambda aid: int(affiliates[aid].growth_potential_score > 0.55) if aid in affiliates else 0
+
+    # Last-30-day communications
+    recent_comms = [
+        c for c in all_comms
+        if c.occurred_at and _make_aware(c.occurred_at) >= cutoff_30d
+    ]
+
+    # ── GROUP 1: Activity ─────────────────────────────────────────────────────
+
+    if aff.last_contact_date:
+        lc = _make_aware(aff.last_contact_date)
+        days_since_contact = max(0, (now - lc).days)
+    else:
+        days_since_contact = 30  # conservative default
+
+    # Use monthly_revenue as revenue_30d proxy (no revenue_30d column on this schema)
+    revenue_30d = float(aff.monthly_revenue or 0.0)
+
+    # ctr_trend_pct is not stored in this schema — default to 0.0
+    ctr_trend_pct = 0.0
+
+    # ── GROUP 2: Communication features ──────────────────────────────────────
+
+    comm_count_30d = len(recent_comms)
+
+    sentiments_30d = [
+        c.sentiment_score for c in recent_comms if c.sentiment_score is not None
+    ]
+    avg_sentiment_30d = (
+        sum(sentiments_30d) / len(sentiments_30d) if sentiments_30d else 0.0
     )
+
+    def _has_tag(comm: Communication, tag: str) -> bool:
+        return tag in (comm.tags or [])
+
+    churn_signal_count = sum(1 for c in recent_comms if _has_tag(c, "churn_signal"))
+    positive_signal_count = sum(
+        1 for c in recent_comms if any(_has_tag(c, t) for t in _POSITIVE_TAGS)
+    )
+    escalation_count = sum(1 for c in recent_comms if _has_tag(c, "escalation") or _has_tag(c, "escalation_risk"))
+    competitor_mention_count = sum(
+        1 for c in recent_comms if _has_tag(c, "competitor_mention")
+    )
+
+    # ── GROUP 3: Derived features ─────────────────────────────────────────────
+
+    # sentiment_trend: last 15d avg minus previous 15d avg
+    last_15d_comms = [
+        c for c in recent_comms
+        if c.occurred_at and _make_aware(c.occurred_at) >= cutoff_15d
+    ]
+    prev_15d_comms = [
+        c for c in recent_comms
+        if c.occurred_at and _make_aware(c.occurred_at) < cutoff_15d
+    ]
+    last_sents = [c.sentiment_score for c in last_15d_comms if c.sentiment_score is not None]
+    prev_sents = [c.sentiment_score for c in prev_15d_comms if c.sentiment_score is not None]
+    avg_last = sum(last_sents) / len(last_sents) if last_sents else 0.0
+    avg_prev = sum(prev_sents) / len(prev_sents) if prev_sents else 0.0
+    sentiment_trend = round(avg_last - avg_prev, 4) if (last_sents or prev_sents) else 0.0
+
+    # response_rate: inbound / total communications (inbound = affiliate-initiated)
+    total = len(all_comms)
+    inbound = sum(1 for c in all_comms if (c.direction or "").lower() == "inbound")
+    response_rate = inbound / total if total > 0 else 0.5
+
+    # days_since_positive: days since last positive/enthusiastic comm
+    positive_comms = [
+        c for c in all_comms
+        if any(_has_tag(c, t) for t in {"enthusiastic", "positive_sentiment", "satisfaction_high"})
+        and c.occurred_at
+    ]
+    if positive_comms:
+        last_positive = max(_make_aware(c.occurred_at) for c in positive_comms)
+        days_since_positive = max(0, (now - last_positive).days)
+    else:
+        days_since_positive = days_since_contact
+
+    return {
+        "affiliate_id": affiliate_id,
+        "affiliate_name": aff.name,
+        "status": _derive_status(aff),
+        # Activity
+        "days_since_contact": days_since_contact,
+        "revenue_30d": round(revenue_30d, 2),
+        "ctr_trend_pct": ctr_trend_pct,
+        # Communication
+        "avg_sentiment_30d": round(avg_sentiment_30d, 4),
+        "comm_count_30d": comm_count_30d,
+        "churn_signal_count": churn_signal_count,
+        "positive_signal_count": positive_signal_count,
+        "escalation_count": escalation_count,
+        "competitor_mention_count": competitor_mention_count,
+        # Derived
+        "sentiment_trend": sentiment_trend,
+        "response_rate": round(response_rate, 4),
+        "days_since_positive": days_since_positive,
+    }
+
+
+def build_all_features(db: Session) -> list[dict]:
+    """
+    Build feature vectors for all affiliates.
+
+    Returns
+    -------
+    List of dicts — each with affiliate_id, affiliate_name, status,
+    and all 12 feature values.
+    """
+    affiliates = db.query(Affiliate).all()
+    return [build_feature_vector(str(aff.id), db) for aff in affiliates]
+
+
+def get_feature_dataframe(db: Session) -> pd.DataFrame:
+    """
+    Call build_all_features() and return a DataFrame with affiliate_id as index.
+
+    Returns
+    -------
+    pd.DataFrame — columns: affiliate_name, status, + 12 feature columns
+    Index: affiliate_id
+    """
+    rows = build_all_features(db)
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df = df.set_index("affiliate_id")
     return df
-
-
-if __name__ == "__main__":
-    df = build_features()
-    print(f"Feature matrix shape: {df.shape}")
-    print(df[["affiliate_id", "tier_encoded", "monthly_revenue",
-              "days_since_last_contact", "avg_sentiment_30d"]].to_string())

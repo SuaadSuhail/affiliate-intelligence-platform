@@ -5,33 +5,61 @@ REST API for the Affiliate Intelligence Platform.
 
 Endpoints
 ---------
-GET  /health                     — service health check
-GET  /affiliates                 — list all affiliates with scores
-GET  /affiliates/{id}            — single affiliate + score history
-GET  /affiliates/{id}/communications  — paginated communications
-POST /affiliates/{id}/score      — trigger re-scoring
-POST /agent/chat                 — chat with the ReAct agent
-POST /ingest/csv                 — upload affiliates CSV
+GET  /health                          — service health check
+GET  /affiliates                      — list all affiliates with scores
+GET  /affiliates/{id}                 — single affiliate + score history
+GET  /affiliates/{id}/communications  — paginated communications for one affiliate
+POST /affiliates/{id}/score           — trigger re-scoring for one affiliate
+POST /agent/chat                      — chat with the LangChain ReAct agent
+
+POST /ingest/full                     — run full ETL from mock data files
+POST /ingest/affiliates               — re-ingest affiliates CSV
+POST /ingest/communications           — re-ingest emails + transcripts
+POST /ingest/csv                      — upload affiliates CSV file
+
+POST /process/nlp                     — tag all untagged communications
+POST /process/embeddings              — embed all unembedded communications
+POST /process/full                    — NLP + embeddings end-to-end
+
+GET  /communications                  — list all communications with tags
+GET  /communications/{id}             — single communication by UUID
+GET  /search                          — semantic search over communications
+
+POST /ml/train                        — train churn + growth XGBoost models
+POST /ml/score                        — score all affiliates and persist
+GET  /ml/scores                       — list current affiliate scores
+GET  /ml/explain/{affiliate_id}       — SHAP feature importances
+GET  /ml/dashboard                    — aggregate health statistics
 
 Run:
-    uvicorn src.api.main:app --reload
+    uvicorn src.api.main:app --port 8080 --reload
 """
 
 from __future__ import annotations
 
+import logging
 import uuid as _uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.storage.database import get_db, health_check as db_health, init_db
-from src.storage.vector_store import vector_store
 from src.storage.models import Affiliate, Communication, ScoreHistory
-from src.ingestion.etl_pipeline import ingest_csv_content
+
+# ─── Routers ──────────────────────────────────────────────────────────────────
+
+from src.api.routers.ingest import router as ingest_router
+from src.api.routers.process import router as process_router
+from src.api.routers.search import router as search_router
+from src.api.routers.ml import router as ml_router
+
+# ─── App ──────────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Affiliate Intelligence Platform",
@@ -52,12 +80,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Include routers ──────────────────────────────────────────────────────────
 
-# ─── Initialise DB on startup ─────────────────────────────────────────────────
+app.include_router(ingest_router, prefix="/ingest", tags=["Ingestion"])
+app.include_router(process_router, prefix="/process", tags=["Processing"])
+app.include_router(search_router, tags=["Search"])
+app.include_router(ml_router, prefix="/ml", tags=["ML"])
+
+
+# ─── Startup ──────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup_event() -> None:
     init_db()
+    routes = [r.path for r in app.routes]
+    logger.info(f"Registered {len(routes)} routes: {routes}")
+    print(f"[startup] {len(routes)} routes registered.")
 
 
 # ─── Pydantic schemas ─────────────────────────────────────────────────────────
@@ -95,32 +133,6 @@ class AffiliateOut(BaseModel):
             growth_potential_score=a.growth_potential_score or 0.5,
             health_score=a.health_score or 50.0,
             last_contact_date=a.last_contact_date.isoformat() if a.last_contact_date else None,
-        )
-
-
-class CommunicationOut(BaseModel):
-    id: str
-    channel: str
-    direction: str
-    subject: Optional[str]
-    content_preview: str
-    sentiment_score: Optional[float]
-    sentiment_label: Optional[str]
-    tags: list[str]
-    occurred_at: Optional[str]
-
-    @classmethod
-    def from_orm(cls, c: Communication) -> "CommunicationOut":
-        return cls(
-            id=str(c.id),
-            channel=c.channel,
-            direction=c.direction,
-            subject=c.subject,
-            content_preview=(c.content or "")[:200] + ("…" if len(c.content or "") > 200 else ""),
-            sentiment_score=c.sentiment_score,
-            sentiment_label=c.sentiment_label,
-            tags=c.tags or [],
-            occurred_at=c.occurred_at.isoformat() if c.occurred_at else None,
         )
 
 
@@ -168,7 +180,7 @@ class ScoreResponse(BaseModel):
     scored_at: str
 
 
-# ─── Helper ───────────────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_affiliate_or_404(affiliate_id: str, db: Session) -> Affiliate:
     try:
@@ -186,6 +198,7 @@ def _get_affiliate_or_404(affiliate_id: str, db: Session) -> Affiliate:
 @app.get("/health", tags=["System"])
 def health() -> dict:
     """Service health check — verifies PostgreSQL and ChromaDB connectivity."""
+    from src.storage.vector_store import vector_store
     pg_ok = db_health()
     chroma_ok = vector_store.health_check()
     return {
@@ -242,7 +255,7 @@ def get_affiliate(
         .all()
     )
     detail = AffiliateDetail(
-        **AffiliateOut.from_orm(aff).dict(),
+        **AffiliateOut.from_orm(aff).model_dump(),
         score_history=[ScoreHistoryOut.from_orm(s) for s in history],
     )
     return detail
@@ -250,16 +263,16 @@ def get_affiliate(
 
 @app.get(
     "/affiliates/{affiliate_id}/communications",
-    response_model=list[CommunicationOut],
+    response_model=list[dict],
     tags=["Affiliates"],
 )
-def get_communications(
+def get_affiliate_communications(
     affiliate_id: str,
     channel: Optional[str] = Query(None, description="Filter: email|call|chat|ticket"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
-) -> list[CommunicationOut]:
+) -> list[dict]:
     """Get paginated communications for an affiliate."""
     aff = _get_affiliate_or_404(affiliate_id, db)
     q = (
@@ -270,21 +283,33 @@ def get_communications(
     if channel:
         q = q.filter(Communication.channel == channel.lower())
     comms = q.offset(offset).limit(limit).all()
-    return [CommunicationOut.from_orm(c) for c in comms]
+    return [
+        {
+            "id": str(c.id),
+            "channel": c.channel,
+            "direction": c.direction,
+            "subject": c.subject,
+            "content_preview": (c.content or "")[:200],
+            "sentiment_score": c.sentiment_score,
+            "sentiment_label": c.sentiment_label,
+            "tags": c.tags or [],
+            "embedding_id": c.embedding_id,
+            "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
+        }
+        for c in comms
+    ]
 
 
-@app.post("/affiliates/{affiliate_id}/score", response_model=ScoreResponse, tags=["Scoring"])
+# ─── Per-affiliate scoring ─────────────────────────────────────────────────────
+
+@app.post("/affiliates/{affiliate_id}/score", response_model=ScoreResponse, tags=["Affiliates"])
 def score_affiliate(
     affiliate_id: str,
     db: Session = Depends(get_db),
 ) -> ScoreResponse:
-    """
-    Trigger full re-scoring (churn + growth + SHAP) for a single affiliate.
-    Updates the affiliate row and appends to score_history.
-    """
+    """Trigger re-scoring for a single affiliate."""
     from src.ml.churn_model import predict_one as churn_one
     from src.ml.growth_model import predict_one as growth_one
-    from src.ml.explainability import explain_affiliate
 
     aff = _get_affiliate_or_404(affiliate_id, db)
     aid = str(aff.id)
@@ -296,13 +321,6 @@ def score_affiliate(
     g_score = growth["growth_potential_score"]
     h_score = round(((1 - c_score) * 0.6 + g_score * 0.4) * 100, 1)
 
-    try:
-        churn_shap = explain_affiliate(aid, model_type="churn")
-        growth_shap = explain_affiliate(aid, model_type="growth")
-    except Exception:
-        churn_shap = {}
-        growth_shap = {}
-
     aff.churn_risk_score = c_score
     aff.growth_potential_score = g_score
     aff.health_score = h_score
@@ -313,7 +331,7 @@ def score_affiliate(
         growth_potential_score=g_score,
         health_score=h_score,
         features=churn.get("features", {}),
-        shap_values={"churn": churn_shap, "growth": growth_shap},
+        shap_values={},
     )
     db.add(entry)
     db.commit()
@@ -331,15 +349,7 @@ def score_affiliate(
 
 @app.post("/agent/chat", response_model=ChatResponse, tags=["Agent"])
 def agent_chat(request: ChatRequest) -> ChatResponse:
-    """
-    Send a message to the LangChain ReAct agent.
-
-    Example messages:
-    - "Who are my top 3 churn risks right now?"
-    - "Summarise the health of Priya Sharma"
-    - "Draft a retention email for Tom Bauer"
-    - "Which affiliates have mentioned competitor networks recently?"
-    """
+    """Send a message to the LangChain ReAct agent."""
     from src.agent.agent import chat
 
     try:
@@ -347,28 +357,4 @@ def agent_chat(request: ChatRequest) -> ChatResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
 
-    return ChatResponse(
-        response=response,
-        session_id=request.session_id,
-    )
-
-
-# ─── Ingestion ────────────────────────────────────────────────────────────────
-
-@app.post("/ingest/csv", tags=["Ingestion"])
-async def ingest_csv(file: UploadFile = File(...)) -> dict:
-    """
-    Upload a CSV file of affiliates to ingest into the platform.
-    Expected columns: name, email, company, tier, join_date, country,
-                      niche, traffic_source, monthly_revenue
-    """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only .csv files are accepted")
-    content = await file.read()
-    csv_text = content.decode("utf-8")
-    result = ingest_csv_content(csv_text)
-    return {
-        "status": "success",
-        "filename": file.filename,
-        **result,
-    }
+    return ChatResponse(response=response, session_id=request.session_id)

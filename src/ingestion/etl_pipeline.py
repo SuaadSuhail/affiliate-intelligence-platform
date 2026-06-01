@@ -52,7 +52,11 @@ def ingest_affiliates_csv(path: Path) -> list[str]:
                 if existing:
                     affiliate = existing
                 else:
-                    affiliate = Affiliate(id=uuid.UUID(row["id"]) if row.get("id") else uuid.uuid4())
+                    try:
+                        aff_id = uuid.UUID(row["id"]) if row.get("id") else uuid.uuid4()
+                    except (ValueError, AttributeError):
+                        aff_id = uuid.uuid4()
+                    affiliate = Affiliate(id=aff_id)
 
                 affiliate.name = row["name"]
                 affiliate.email = row["email"]
@@ -182,9 +186,15 @@ def ingest_communications_file(path: Path) -> list[str]:
             comm_ids.append(str(comm.id))
 
             # Update affiliate last_contact_date
+            # Normalise to naive UTC for comparison — both sides are UTC
+            def _as_naive(dt):
+                if dt is None:
+                    return None
+                return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
             if (
                 affiliate.last_contact_date is None
-                or occurred_at > affiliate.last_contact_date
+                or _as_naive(occurred_at) > _as_naive(affiliate.last_contact_date)
             ):
                 affiliate.last_contact_date = occurred_at
 

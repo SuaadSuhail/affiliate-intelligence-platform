@@ -229,8 +229,11 @@ Run with: `uvicorn src.api.main:app --port 8080 --reload`
 | POST | `/affiliates/{id}/score` | Scoring | Trigger re-scoring for a single affiliate |
 | POST | `/agent/chat` | Agent | Chat with the LangChain ReAct agent |
 | POST | `/process/nlp` | NLP | Run NLP tagging on all untagged communications |
+| POST | `/process/embeddings` | Embeddings | Embed all unembedded communications into ChromaDB |
+| POST | `/process/full` | Embeddings | Run NLP + embeddings end-to-end (idempotent) |
 | GET | `/communications` | Communications | List all communications with tags + sentiment |
 | GET | `/communications/{id}` | Communications | Single communication by UUID |
+| GET | `/search` | Search | Semantic search; params: `q`, `affiliate_id`, `tags`, `n` |
 
 ---
 
@@ -446,3 +449,41 @@ populate communications
 
 **Output:** `tags[]` and `sentiment_score` written to every `communications` row;
 7/7 communications tagged in the mock dataset
+
+---
+
+### Embedding generator
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **File** | `src/ingestion/embedding_generator.py` |
+| **Tests** | `tests/test_embeddings.py` — 6 tests, all passing |
+
+**What it does:** Chunks each communication's `raw_text` into 200-word overlapping
+segments, encodes each chunk with `all-MiniLM-L6-v2`, and stores the vectors +
+metadata in ChromaDB's `communications_embeddings` collection.  Writes the first
+chunk's doc_id back to `communications.embedding_id` in PostgreSQL.
+
+**Model:** `sentence-transformers/all-MiniLM-L6-v2` — loaded once at module level,
+produces 384-dimension vectors.
+
+**Key functions:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `chunk_text` | `(text, chunk_size=200, overlap=50) -> list[str]` | Overlapping word-level chunking |
+| `embed_communication` | `(comm, db, vs) -> dict` | Embed one record; returns `{comm_id, chunks_created, embedding_id}` |
+| `embed_all_communications` | `(db, vs) -> dict` | Embed all where `embedding_id IS NULL`; returns `{total_processed, total_chunks_created, already_embedded}` |
+
+**ChromaDB metadata per chunk:**
+- `affiliate_id`, `affiliate_name`, `source`, `occurred_at`, `tags` (pipe-joined display string)
+- `tag_{name} = True` for each tag — individual boolean fields used for `$eq` filtering
+  (chromadb 1.x does not support `$contains` on metadata string fields)
+
+**API endpoints:** `POST /process/embeddings`, `POST /process/full`, `GET /search`
+
+**Depends on:** NLP processor must run first so `tags[]` are available for metadata
+
+**Output:** 7/7 communications embedded; 13 total chunks stored in ChromaDB
+(`communications_embeddings` collection)

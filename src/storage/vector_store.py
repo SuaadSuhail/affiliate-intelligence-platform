@@ -175,6 +175,110 @@ class VectorStore:
             kwargs["where"] = where
         return self.profiles.query(**kwargs)
 
+    # ── High-level helpers (used by embedding_generator) ──────────────────────
+
+    def add_document(
+        self,
+        doc_id: str,
+        text: str,
+        embedding: list[float],
+        affiliate_id: str,
+        affiliate_name: str,
+        source: str,
+        tags: list[str],
+        occurred_at: str,
+    ) -> None:
+        """
+        Store one communication chunk with full metadata.
+
+        Tags are stored two ways:
+        - ``tags`` field: pipe-delimited string for display ("|tag1|tag2|")
+        - ``tag_{name}`` boolean fields: one per tag, used for ChromaDB
+          ``$eq`` filtering (chromadb 1.x does not support string $contains
+          on metadata fields).
+        """
+        metadata: dict = {
+            "affiliate_id": affiliate_id,
+            "affiliate_name": affiliate_name,
+            "source": source,
+            "tags": "|" + "|".join(tags) + "|" if tags else "",
+            "occurred_at": occurred_at,
+        }
+        for tag in tags:
+            metadata[f"tag_{tag}"] = True
+        self.comms.upsert(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[metadata],
+        )
+
+    def search_similar(
+        self,
+        query_embedding: list[float],
+        n_results: int = 5,
+        affiliate_id: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """
+        Semantic search over the communications_embeddings collection.
+
+        Parameters
+        ----------
+        query_embedding : 384-dim float list
+        n_results       : max results to return
+        affiliate_id    : optional filter to one affiliate UUID
+        tags            : optional list of tag names — all must be present
+                          (uses per-tag boolean metadata fields)
+
+        Returns
+        -------
+        List of dicts with keys: id, text, metadata, distance
+        """
+        conditions: list[dict] = []
+        if affiliate_id:
+            conditions.append({"affiliate_id": {"$eq": affiliate_id}})
+        if tags:
+            # Each tag is stored as tag_{name}=True — use $eq filter
+            for tag in tags:
+                conditions.append({f"tag_{tag}": {"$eq": True}})
+
+        where: Optional[dict] = None
+        if len(conditions) == 1:
+            where = conditions[0]
+        elif len(conditions) > 1:
+            where = {"$and": conditions}
+
+        # Guard: ChromaDB raises if n_results > collection size
+        try:
+            count = self.comms.count()
+        except Exception:
+            count = n_results
+        actual_n = min(n_results, max(1, count))
+
+        kwargs: dict = {
+            "query_embeddings": [query_embedding],
+            "n_results": actual_n,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if where:
+            kwargs["where"] = where
+
+        try:
+            raw = self.comms.query(**kwargs)
+        except Exception:
+            return []
+
+        results = []
+        for i in range(len(raw["ids"][0])):
+            results.append({
+                "id": raw["ids"][0][i],
+                "text": raw["documents"][0][i],
+                "metadata": raw["metadatas"][0][i],
+                "distance": raw["distances"][0][i],
+            })
+        return results
+
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def health_check(self) -> bool:

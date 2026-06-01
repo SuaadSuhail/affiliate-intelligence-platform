@@ -107,14 +107,16 @@ def build_feature_vector(affiliate_id: str, db: Session) -> dict:
 
     # ── GROUP 1: Activity ─────────────────────────────────────────────────────
 
-    if aff.last_contact_date:
-        lc = _make_aware(aff.last_contact_date)
+    # last_contact_at is the new schema field (was last_contact_date in old schema)
+    lc_field = getattr(aff, "last_contact_at", None) or getattr(aff, "last_contact_date", None)
+    if lc_field:
+        lc = _make_aware(lc_field)
         days_since_contact = max(0, (now - lc).days)
     else:
-        days_since_contact = 30  # conservative default
+        days_since_contact = int(getattr(aff, "days_since_contact", 30) or 30)
 
-    # Use monthly_revenue as revenue_30d proxy (no revenue_30d column on this schema)
-    revenue_30d = float(aff.monthly_revenue or 0.0)
+    # revenue_30d (new schema) or fall back to monthly_revenue (old schema)
+    revenue_30d = float(getattr(aff, "revenue_30d", None) or getattr(aff, "monthly_revenue", None) or 0.0)
 
     # ctr_trend_pct is not stored in this schema — default to 0.0
     ctr_trend_pct = 0.0
@@ -159,10 +161,9 @@ def build_feature_vector(affiliate_id: str, db: Session) -> dict:
     avg_prev = sum(prev_sents) / len(prev_sents) if prev_sents else 0.0
     sentiment_trend = round(avg_last - avg_prev, 4) if (last_sents or prev_sents) else 0.0
 
-    # response_rate: inbound / total communications (inbound = affiliate-initiated)
+    # response_rate: new schema has no direction column — default to 0.5
     total = len(all_comms)
-    inbound = sum(1 for c in all_comms if (c.direction or "").lower() == "inbound")
-    response_rate = inbound / total if total > 0 else 0.5
+    response_rate = 0.5 if total == 0 else min(1.0, total / max(1, days_since_contact or 1) / 10)
 
     # days_since_positive: days since last positive/enthusiastic comm
     positive_comms = [

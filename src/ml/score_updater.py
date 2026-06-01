@@ -86,9 +86,6 @@ def update_all_scores(db: Session) -> dict:
             churn_risk_score=round(churn_score, 4),
             growth_potential_score=round(growth_score, 4),
             health_score=health,
-            features=features,
-            shap_values={},
-            model_version="rule-based-v1.0",
             scored_at=datetime.now(timezone.utc),
         )
         db.add(entry)

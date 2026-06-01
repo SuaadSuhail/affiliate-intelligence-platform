@@ -11,10 +11,12 @@ GET  /affiliates/{id}                 — single affiliate + score history
 GET  /affiliates/{id}/communications  — paginated communications
 POST /affiliates/{id}/score           — trigger re-scoring
 POST /agent/chat                      — chat with the ReAct agent
-POST /ingest/csv                      — upload affiliates CSV
 POST /process/nlp                     — run NLP on all untagged communications
+POST /process/embeddings              — embed all unembedded communications
+POST /process/full                    — run NLP + embeddings end-to-end
 GET  /communications                  — list all communications with tags
 GET  /communications/{comm_id}        — single communication by UUID
+GET  /search                          — semantic search over communications
 
 Run:
     uvicorn src.api.main:app --reload --port 8080
@@ -98,6 +100,7 @@ class CommunicationOut(BaseModel):
     raw_text_preview: str
     tags: list[str]
     sentiment_score: float
+    embedding_id: Optional[str]
     occurred_at: Optional[str]
 
     @classmethod
@@ -110,6 +113,7 @@ class CommunicationOut(BaseModel):
             raw_text_preview=raw[:200] + ("…" if len(raw) > 200 else ""),
             tags=c.tags or [],
             sentiment_score=c.sentiment_score or 0.0,
+            embedding_id=c.embedding_id,
             occurred_at=c.occurred_at.isoformat() if c.occurred_at else None,
         )
 
@@ -158,6 +162,25 @@ class NLPResult(BaseModel):
     total_processed: int
     total_tagged: int
     tag_summary: dict[str, int]
+
+
+class EmbeddingResult(BaseModel):
+    total_processed: int
+    total_chunks_created: int
+    already_embedded: int
+
+
+class FullPipelineResult(BaseModel):
+    etl: dict
+    nlp: NLPResult
+    embeddings: EmbeddingResult
+
+
+class SearchResultItem(BaseModel):
+    id: str
+    text: str
+    metadata: dict
+    distance: float
 
 
 # ─── Helper ───────────────────────────────────────────────────────────────────
@@ -314,6 +337,105 @@ def get_communication(
     """Return a single communication by UUID."""
     comm = _get_comm_or_404(comm_id, db)
     return CommunicationOut.from_orm(comm)
+
+
+# ─── Embedding Processing ─────────────────────────────────────────────────────
+
+@app.post("/process/embeddings", response_model=EmbeddingResult, tags=["Embeddings"])
+def run_embedding_processing(
+    db: Session = Depends(get_db),
+) -> EmbeddingResult:
+    """
+    Embed all communications that do not yet have an embedding_id.
+
+    Chunks each communication's raw_text, encodes with all-MiniLM-L6-v2,
+    and stores vectors + metadata in ChromaDB.  Writes the first chunk's
+    doc_id back to communications.embedding_id in PostgreSQL.
+    """
+    from src.ingestion.embedding_generator import (
+        embed_all_communications,
+        vector_store as emb_vs,
+    )
+
+    result = embed_all_communications(db, emb_vs)
+    db.commit()
+    return EmbeddingResult(**result)
+
+
+@app.post("/process/full", response_model=FullPipelineResult, tags=["Embeddings"])
+def run_full_pipeline(
+    db: Session = Depends(get_db),
+) -> FullPipelineResult:
+    """
+    Run the complete pipeline end-to-end:
+      1. ETL  — reload affiliates + communications from mock data files
+      2. NLP  — tag all untagged communications
+      3. Embed — embed all unembedded communications
+
+    Safe to call multiple times; each step is idempotent.
+    """
+    from src.ingestion.nlp_processor import process_all_communications
+    from src.ingestion.embedding_generator import (
+        embed_all_communications,
+        vector_store as emb_vs,
+    )
+
+    # Step 1 — ETL (manages its own session internally)
+    etl_result: dict = {"status": "skipped"}
+    try:
+        from src.ingestion.etl_pipeline import run_full_pipeline as _etl
+        _etl()
+        etl_result = {"status": "complete"}
+    except Exception as exc:
+        etl_result = {"status": "error", "detail": str(exc)}
+
+    # Step 2 — NLP
+    # Refresh session after ETL wrote its own commits
+    db.expire_all()
+    nlp_raw = process_all_communications(db)
+    db.commit()
+
+    # Step 3 — Embeddings
+    emb_raw = embed_all_communications(db, emb_vs)
+    db.commit()
+
+    return FullPipelineResult(
+        etl=etl_result,
+        nlp=NLPResult(**nlp_raw),
+        embeddings=EmbeddingResult(**emb_raw),
+    )
+
+
+# ─── Semantic search ──────────────────────────────────────────────────────────
+
+@app.get("/search", response_model=list[SearchResultItem], tags=["Search"])
+def search(
+    q: str = Query(..., description="Natural-language search query"),
+    affiliate_id: Optional[str] = Query(None, description="Filter to one affiliate UUID"),
+    tags: Optional[str] = Query(None, description="Comma-separated tag names to filter by"),
+    n: int = Query(5, ge=1, le=20, description="Number of results"),
+) -> list[SearchResultItem]:
+    """
+    Semantic search over embedded communications.
+
+    Returns the closest matching communication chunks ranked by cosine
+    similarity to the query.  Optionally filter by affiliate_id and/or tags.
+    """
+    from src.ingestion.embedding_generator import model, vector_store as emb_vs
+
+    query_embedding = model.encode(q).tolist()
+
+    tag_list: Optional[list[str]] = (
+        [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    )
+
+    results = emb_vs.search_similar(
+        query_embedding=query_embedding,
+        n_results=n,
+        affiliate_id=affiliate_id,
+        tags=tag_list,
+    )
+    return [SearchResultItem(**r) for r in results]
 
 
 # ─── Scoring ──────────────────────────────────────────────────────────────────

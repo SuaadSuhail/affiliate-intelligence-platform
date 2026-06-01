@@ -181,21 +181,37 @@ Used for: finding similar affiliates, clustering, agent profile lookups.
 
 ## 5. ML Model Architecture
 
+### Design principle
+With only 10 affiliates, XGBoost cannot be relied on as a primary predictor.
+The system uses **rule-based scoring as primary** and XGBoost as secondary
+(activated after `POST /ml/train`).
+
+### Feature vector (12 features — see § 12 for full details)
+Activity: `days_since_contact`, `revenue_30d`, `ctr_trend_pct`
+Communication (30d): `avg_sentiment_30d`, `comm_count_30d`, tag counts (5 features)
+Derived: `sentiment_trend`, `response_rate`, `days_since_positive`
+
 ### Churn Model (`churn_model.py`)
-- **Algorithm**: XGBoostClassifier
-- **Target**: `churn_risk_score` (binary label: churned within 90 days)
-- **Key features**: days_since_last_contact, churn_signal_count, satisfaction_low_count,
-  competitor_mention_count, payment_issue_count, escalation_risk_count,
-  avg_sentiment_score (30d), comm_frequency_decline_ratio, days_since_join,
-  monthly_revenue, tier_encoded
+- **Primary**: `calculate_churn_risk_rules(features)` — weighted rule-based scorer
+- **Secondary**: `train_churn_model(df)` → XGBClassifier (n_estimators=50, max_depth=3)
+- **Target**: `status in ['at_risk', 'churned']` (derived from `churn_risk_score > 0.7`)
+- **Artefact**: `models/churn_model.pkl`
 
 ### Growth Model (`growth_model.py`)
-- **Algorithm**: XGBoostClassifier
-- **Target**: `growth_potential_score` (binary label: revenue grew ≥ 20% in 90 days)
-- **Key features**: growth_intent_count, new_opportunity_count, satisfaction_high_count,
-  high_engagement_count, seasonal_pattern_count, feature_request_count,
-  avg_sentiment_score (30d), comm_frequency_growth_ratio, monthly_revenue,
-  tier_encoded, relationship_warm_count
+- **Primary**: `calculate_growth_potential_rules(features)` — weighted rule-based scorer
+- **Secondary**: `train_growth_model(df)` → XGBClassifier (same params)
+- **Target**: `status == 'high_growth'` (derived from `growth_potential_score > 0.7`)
+- **Artefact**: `models/growth_model.pkl`
+
+### Explainability (`explainability.py`)
+- SHAP TreeExplainer on the XGBoost model
+- `get_shap_explanation()` returns top 5 factors with `{feature, shap_value, feature_value, direction}`
+- Falls back to rule-based prediction summary if model not trained
+
+### Score updater (`score_updater.py`)
+- `update_all_scores(db)` — runs the full pipeline for every affiliate
+- Health score: `round(((1 - churn_risk) × 0.6 + growth × 0.4) × 100, 1)`
+- Idempotent within a day (skips affiliates already scored today)
 
 ---
 
@@ -220,20 +236,34 @@ Used for: finding similar affiliates, clustering, agent profile lookups.
 
 Run with: `uvicorn src.api.main:app --port 8080 --reload`
 
-| Method | Path | Tag | Description |
+Endpoints are defined in `src/api/routers/` and wired into `src/api/main.py`
+via `app.include_router(...)`. Startup logs the total registered route count.
+
+| Method | Path | Router file | Description |
 |---|---|---|---|
-| GET | `/health` | System | Service health check |
-| GET | `/affiliates` | Affiliates | List all affiliates with scores (filterable by `status`) |
-| GET | `/affiliates/{id}` | Affiliates | Single affiliate with full score history |
-| GET | `/affiliates/{id}/communications` | Affiliates | Paginated communications for one affiliate |
-| POST | `/affiliates/{id}/score` | Scoring | Trigger re-scoring for a single affiliate |
-| POST | `/agent/chat` | Agent | Chat with the LangChain ReAct agent |
-| POST | `/process/nlp` | NLP | Run NLP tagging on all untagged communications |
-| POST | `/process/embeddings` | Embeddings | Embed all unembedded communications into ChromaDB |
-| POST | `/process/full` | Embeddings | Run NLP + embeddings end-to-end (idempotent) |
-| GET | `/communications` | Communications | List all communications with tags + sentiment |
-| GET | `/communications/{id}` | Communications | Single communication by UUID |
-| GET | `/search` | Search | Semantic search; params: `q`, `affiliate_id`, `tags`, `n` |
+| GET | `/health` | main.py | Service health check (PostgreSQL + ChromaDB) |
+| GET | `/affiliates` | main.py | List affiliates with filtering + sorting |
+| GET | `/affiliates/{id}` | main.py | Single affiliate with score history |
+| GET | `/affiliates/{id}/communications` | main.py | Paginated communications |
+| POST | `/affiliates/{id}/score` | main.py | Trigger re-scoring for one affiliate |
+| POST | `/agent/chat` | main.py | Chat with the LangChain ReAct agent |
+| POST | `/ingest/full` | routers/ingest.py | Run full ETL from mock data files |
+| POST | `/ingest/affiliates` | routers/ingest.py | Re-ingest affiliates CSV only |
+| POST | `/ingest/communications` | routers/ingest.py | Re-ingest emails + transcripts |
+| POST | `/ingest/csv` | routers/ingest.py | Upload affiliates CSV file |
+| POST | `/process/nlp` | routers/process.py | Tag all untagged communications |
+| POST | `/process/embeddings` | routers/process.py | Embed all unembedded communications |
+| POST | `/process/full` | routers/process.py | NLP + embeddings end-to-end |
+| GET | `/communications` | routers/search.py | List all communications with tags |
+| GET | `/communications/{id}` | routers/search.py | Single communication by UUID |
+| GET | `/search` | routers/search.py | Semantic search; params: `q`, `affiliate_id`, `n` |
+| POST | `/ml/train` | routers/ml.py | Train churn + growth XGBoost models |
+| POST | `/ml/score` | routers/ml.py | Score all affiliates and persist results |
+| GET | `/ml/scores` | routers/ml.py | List current affiliate scores |
+| GET | `/ml/explain/{id}` | routers/ml.py | SHAP feature importances for one affiliate |
+| GET | `/ml/dashboard` | routers/ml.py | Aggregate health stats across all affiliates |
+
+**Total: 21 routes**
 
 ---
 
@@ -246,12 +276,13 @@ See `.env.example` for all required variables. Never commit `.env`.
 ## 9. Running Locally
 
 ```bash
-docker-compose up -d          # start PostgreSQL + ChromaDB
-conda activate affiliate-intelligence   # or: pip install -r requirements.txt
+docker compose up -d                          # start PostgreSQL + ChromaDB
+conda activate affiliate-intelligence         # or: pip install -r requirements.txt
 python -m spacy download en_core_web_sm
-python src/ingestion/etl_pipeline.py   # seed mock data (10 affiliates, 7 comms)
-uvicorn src.api.main:app --port 8080 --reload  # start API on :8080
-curl -X POST http://localhost:8080/process/nlp # tag all communications
+python src/ingestion/etl_pipeline.py          # seed mock data (10 affiliates, 14 comms)
+uvicorn src.api.main:app --port 8080 --reload # start API on :8080
+curl -X POST http://localhost:8080/process/nlp        # tag all communications
+curl -X POST http://localhost:8080/process/embeddings # embed all communications
 ```
 
 ---
@@ -263,10 +294,10 @@ curl -X POST http://localhost:8080/process/nlp # tag all communications
 | Service | Image | Host port | Notes |
 |---|---|---|---|
 | `postgres` | `postgres:16-alpine` | `5432` | healthcheck: `pg_isready` |
-| `chromadb` | `chromadb/chroma:latest` | `8001` | container internal port 8000; NO auth; NO healthcheck |
+| `chromadb` | `chromadb/chroma:latest` | `8001` | container internal port 8000; **NO auth**; **NO healthcheck** |
 | `app` | custom build | `8080` | depends on postgres (healthy) + chromadb (started) |
 
-**chromadb environment (only these two):**
+**chromadb environment (only these two — do not add auth vars):**
 ```
 IS_PERSISTENT=TRUE
 PERSIST_DIRECTORY=/chroma/chroma
@@ -280,18 +311,16 @@ DATABASE_URL=postgresql://...@postgres:5432/affiliate_intelligence
 OPENAI_API_KEY=...
 ```
 
-### Known fixes applied
+### Known fixes — permanently committed to git
 
-- **chromadb 1.5.9 does not support token auth** — never add `CHROMA_SERVER_AUTH_*`
-  variables to the chromadb service. The `chromadb.auth.token` module does not exist
-  in chromadb ≥ 1.0 and causes the container to fail on startup.
-- **chromadb healthcheck removed** — the container starts successfully but fails the
-  `curl /api/v1/heartbeat` check (v1 API path is gone in chromadb ≥ 1.0). No
-  healthcheck is defined; app uses `service_started` instead of `service_healthy`.
-- **Port conflict resolved** — app runs on `8080`, chromadb is exposed on host port
-  `8001` (maps to container port `8000`). Never use `8000` for the app.
-- **`version:` attribute removed** — the top-level `version: "3.9"` key is obsolete
-  in Docker Compose v2 and causes a warning; omit it entirely.
+The `docker-compose.yml` has all fixes applied. Do **not** re-add any of these:
+
+- **chromadb 1.5.9 does not support token auth** — `CHROMA_SERVER_AUTH_*` env vars
+  cause container startup failure; they have been removed.
+- **chromadb healthcheck removed** — the `/api/v1/heartbeat` path does not exist in
+  chromadb ≥ 1.0; `app` uses `service_started` instead of `service_healthy`.
+- **Port conflict resolved** — app on `8080`, chromadb on host port `8001` (container `8000`).
+- **`version:` attribute removed** — obsolete in Docker Compose v2; omit entirely.
 
 ### Daily startup sequence
 
@@ -384,7 +413,29 @@ feat(agent): add draft_email tool to LangChain agent
 
 **Infrastructure fix:** Removed `chromadb.auth.token.TokenAuthClientProvider` from
 `_get_client()` — that module does not exist in chromadb ≥ 1.0. Client now connects
-without auth settings (token auth is configured at the ChromaDB server level via env).
+without auth settings.
+
+---
+
+### API layer
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **Files** | `src/api/main.py`, `src/api/routers/ingest.py`, `src/api/routers/process.py`, `src/api/routers/search.py`, `src/api/routers/ml.py` |
+
+**Structure:** `main.py` imports and wires all four routers via `app.include_router()`.
+On startup it logs the total registered route count. Endpoint logic lives in
+`src/api/routers/` — **not** in the ingestion/ML module files.
+
+| Router | Prefix | Endpoints |
+|---|---|---|
+| `ingest.py` | `/ingest` | `POST /full`, `/affiliates`, `/communications`, `/csv` |
+| `process.py` | `/process` | `POST /nlp`, `/embeddings`, `/full` |
+| `search.py` | *(none)* | `GET /communications`, `/communications/{id}`, `/search` |
+| `ml.py` | `/ml` | `POST /train`, `/score` · `GET /scores`, `/explain/{id}`, `/dashboard` |
+
+**Total routes: 21** (verified via `/openapi.json`)
 
 ---
 
@@ -395,24 +446,20 @@ without auth settings (token auth is configured at the ChromaDB server level via
 | **Status** | Complete |
 | **File** | `src/ingestion/etl_pipeline.py` |
 
-**What it does:** Reads the mock CSV and flat-text communication files from
-`data/mock/` and loads them into PostgreSQL with full upsert logic:
-- `run_affiliate_etl(db)` — reads `affiliates.csv` via Pandas; upserts by `name`;
-  parses `last_contact_at`, computes `days_since_contact`
-- `run_communications_etl(db)` — parses `[AFFILIATE: Name]` / `[DATE: ...]` header
-  blocks from `emails.txt` and `transcripts.txt`; links to affiliate by name;
-  upserts by `(affiliate_id, occurred_at)`; leaves `tags = []` and `embedding_id = None`
-- `run_full_etl(db)` — calls both jobs in a single transaction; commits on success,
-  rolls back on any failure
+**What it does:** Reads mock CSV and flat-text files from `data/mock/`, runs NLP tagging
+inline (`process_text()`), generates embeddings via `EmbeddingGenerator`, and upserts
+everything into PostgreSQL and ChromaDB. `run_full_pipeline()` is the single entry point.
 
-**API endpoints:** `POST /ingest/full`, `POST /ingest/affiliates`,
-`POST /ingest/communications`
+**Key functions:** `run_full_pipeline()`, `ingest_affiliates_csv(path)`,
+`ingest_communications_file(path)`, `index_affiliate_profiles()`, `ingest_csv_content(csv_str)`
 
-**Output:** 10 affiliates + 7 communications in PostgreSQL after a clean run
+**Output:** 10 affiliates + 14 communications in PostgreSQL; affiliate profiles in ChromaDB
 
-**Idempotent:** Re-running updates existing rows rather than duplicating them
+**Idempotent:** upserts by email (affiliates); creates new comm rows on each run
 
-**Depends on:** Storage layer (must call `init_db()` before first run)
+**Fixes applied:**
+- Non-UUID IDs in mock CSV (`aff-001`) now handled gracefully — falls back to `uuid4()`
+- Offset-aware vs offset-naive datetime comparison fixed in `last_contact_date` update
 
 ---
 
@@ -441,8 +488,7 @@ Scoring = average of matched word scores, clamped to [-1.0, +1.0].
 | `process_single_communication` | `(comm: Communication, db: Session) -> dict` | Full pipeline for one record |
 | `process_all_communications` | `(db: Session) -> dict` | Bulk tags all untagged comms; returns summary |
 
-**API endpoints:** `POST /process/nlp`, `GET /communications`,
-`GET /communications/{id}`
+**API endpoints:** `POST /process/nlp`, `GET /communications`, `GET /communications/{id}`
 
 **Depends on:** Storage layer (models + DB session), ETL pipeline must run first to
 populate communications
@@ -462,7 +508,7 @@ populate communications
 
 **What it does:** Chunks each communication's `raw_text` into 200-word overlapping
 segments, encodes each chunk with `all-MiniLM-L6-v2`, and stores the vectors +
-metadata in ChromaDB's `communications_embeddings` collection.  Writes the first
+metadata in ChromaDB's `communications_embeddings` collection. Writes the first
 chunk's doc_id back to `communications.embedding_id` in PostgreSQL.
 
 **Model:** `sentence-transformers/all-MiniLM-L6-v2` — loaded once at module level,
@@ -487,3 +533,68 @@ produces 384-dimension vectors.
 
 **Output:** 7/7 communications embedded; 13 total chunks stored in ChromaDB
 (`communications_embeddings` collection)
+
+---
+
+### ML models
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **Files** | `src/ml/feature_engineering.py`, `src/ml/churn_model.py`, `src/ml/growth_model.py`, `src/ml/explainability.py`, `src/ml/score_updater.py` |
+| **Tests** | `tests/test_ml.py` — 5 tests, all passing |
+
+**Features (12 total across 3 groups):**
+
+| Group | Features |
+|---|---|
+| Activity | `days_since_contact`, `revenue_30d`, `ctr_trend_pct` |
+| Communication (30d) | `avg_sentiment_30d`, `comm_count_30d`, `churn_signal_count`, `positive_signal_count`, `escalation_count`, `competitor_mention_count` |
+| Derived | `sentiment_trend`, `response_rate`, `days_since_positive` |
+
+**What each file does:**
+- `feature_engineering.py` — `build_feature_vector(affiliate_id, db)` computes all 12 features
+  for one affiliate; `build_all_features(db)` iterates all affiliates; `get_feature_dataframe(db)`
+  returns a pandas DataFrame indexed by `affiliate_id`
+- `churn_model.py` — `calculate_churn_risk_rules(features)` (rule-based, always available) +
+  `train_churn_model(df)` (XGBoost, saved to `models/churn_model.pkl`) +
+  `predict_churn_risk(affiliate_id, features)` (uses XGBoost if model exists, rules as fallback)
+- `growth_model.py` — identical structure for `growth_potential_score`;
+  `calculate_growth_potential_rules()`, `train_growth_model()`, `predict_growth_potential()`
+- `explainability.py` — `get_shap_explanation(affiliate_id, features, model_type)` returns
+  `{affiliate_id, model_type, base_value, prediction, top_factors[5]}` with per-factor
+  `{feature, shap_value, feature_value, direction}`;
+  also exposes legacy `explain_affiliate()` and `top_risk_drivers()` for router compatibility
+- `score_updater.py` — `update_all_scores(db)` scores every affiliate, writes results to
+  `affiliates` table and inserts into `score_history`; skips affiliates already scored today
+
+**Important design decision:** With only 10 affiliates, XGBoost produces unreliable predictions.
+Rule-based scorers are the primary method; XGBoost is secondary (activated after `POST /ml/train`).
+
+**Artefacts:** `models/churn_model.pkl`, `models/growth_model.pkl` — tracked in `.gitignore`, never committed
+
+**API:** `POST /ml/train`, `POST /ml/score`, `GET /ml/scores` (worst-first),
+`GET /ml/explain/{id}`, `GET /ml/dashboard`
+
+---
+
+### Infrastructure fixes applied
+
+| File | Fix |
+|---|---|
+| `src/storage/vector_store.py` | Removed `chromadb.auth.token.TokenAuthClientProvider` — module does not exist in chromadb ≥ 1.0; client now connects without auth settings |
+| `src/ingestion/etl_pipeline.py` | Handle non-UUID IDs in mock CSV gracefully; fix offset-aware vs offset-naive datetime comparison |
+| `docker-compose.yml` | Removed `version:` attribute, all `CHROMA_SERVER_AUTH_*` env vars, and chromadb healthcheck; `app` chromadb dependency changed to `service_started`; app port fixed to `8080`, `CHROMA_PORT` fixed to `8001` |
+
+---
+
+### Current data state
+
+| | |
+|---|---|
+| Affiliates in PostgreSQL | 10 |
+| Communications in PostgreSQL | 14 (expanded mock data) |
+| Communications tagged | 14 / 14 |
+| Communications embedded | 14 / 14 |
+| ChromaDB collection | `communications_embeddings` + `affiliate_profiles` |
+| Semantic search | Working via `GET /search` |

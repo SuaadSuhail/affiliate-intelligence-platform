@@ -16,7 +16,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
   chromadb:
     image: chromadb/chroma:latest
     container_name: aip_chromadb
@@ -28,7 +27,6 @@ services:
       - "8001:8000"
     volumes:
       - chroma_data:/chroma/chroma
-
   app:
     build:
       context: .
@@ -51,7 +49,6 @@ services:
       - ./src:/app/src
       - ./data:/app/data
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --reload
-
 volumes:
   postgres_data:
   chroma_data:

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -18,27 +16,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
   chromadb:
     image: chromadb/chroma:latest
     container_name: aip_chromadb
     restart: unless-stopped
     environment:
-      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.token.TokenConfigServerAuthCredentialsProvider
-      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_TOKEN:-chroma_secret_token}
-      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
       - IS_PERSISTENT=TRUE
       - PERSIST_DIRECTORY=/chroma/chroma
     ports:
       - "8001:8000"
     volumes:
       - chroma_data:/chroma/chroma
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   app:
     build:
       context: .
@@ -49,20 +37,18 @@ services:
       postgres:
         condition: service_healthy
       chromadb:
-        condition: service_healthy
+        condition: service_started
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-aip_user}:${POSTGRES_PASSWORD:-aip_secret}@postgres:5432/${POSTGRES_DB:-affiliate_intelligence}
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-      - CHROMA_TOKEN=${CHROMA_TOKEN:-chroma_secret_token}
+      - CHROMA_PORT=8001
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - ./src:/app/src
       - ./data:/app/data
-    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
-
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --reload
 volumes:
   postgres_data:
   chroma_data:

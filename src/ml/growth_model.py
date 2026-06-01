@@ -1,16 +1,12 @@
 """
 Growth Potential Model
 ======================
-Trains and serves an XGBoost classifier that outputs growth_potential_score (0–1).
+Predicts growth_potential_score (0.0–1.0) for each affiliate.
 
-Target
-------
-growth_label = 1 if affiliate grew revenue ≥ 20% within 90 days (synthetic
-labels from feature_engineering.generate_synthetic_labels on mock data)
+Primary: rule-based scorer (always available)
+Secondary: XGBoost classifier (used when model artefact exists)
 
-Artefact
---------
-Saved to GROWTH_MODEL_PATH (default: models/growth_model.json)
+Artefact saved to: models/growth_model.pkl
 """
 
 from __future__ import annotations
@@ -19,87 +15,110 @@ import os
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
+import joblib
 import pandas as pd
-from dotenv import load_dotenv
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, classification_report
 from xgboost import XGBClassifier
 
-from src.ml.feature_engineering import (
-    build_features,
-    feature_columns,
-    generate_synthetic_labels,
-)
+from src.ml.feature_engineering import FEATURE_NAMES
 
-load_dotenv()
+GROWTH_MODEL_PATH = Path(os.getenv("GROWTH_MODEL_PATH", "models/growth_model.pkl"))
 
-MODEL_PATH = Path(os.getenv("GROWTH_MODEL_PATH", "models/growth_model.json"))
-MODEL_VERSION = "1.0.0"
-
-# ─── XGBoost hyperparameters ─────────────────────────────────────────────────
-XGBOOST_PARAMS = {
-    "n_estimators": 200,
-    "max_depth": 4,
-    "learning_rate": 0.05,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "use_label_encoder": False,
+_XGBOOST_PARAMS = {
+    "n_estimators": 50,
+    "max_depth": 3,
+    "learning_rate": 0.1,
+    "random_state": 42,
     "eval_metric": "logloss",
-    "random_state": 99,
-    "n_jobs": -1,
+    "use_label_encoder": False,
 }
 
 _model: Optional[XGBClassifier] = None
 
 
+# ─── Rule-based scorer ────────────────────────────────────────────────────────
+
+def calculate_growth_potential_rules(features: dict) -> float:
+    """
+    Rule-based growth potential scorer.
+
+    Each rule adds a weighted contribution; final score clamped to [0.0, 1.0].
+    """
+    score = 0.0
+
+    pos_sigs = features.get("positive_signal_count", 0)
+    if pos_sigs >= 3:
+        score += 0.30
+    elif pos_sigs >= 1:
+        score += 0.15
+
+    sent = features.get("avg_sentiment_30d", 0.0)
+    if sent > 0.4:
+        score += 0.25
+    elif sent > 0.2:
+        score += 0.12
+
+    comms = features.get("comm_count_30d", 0)
+    if comms >= 3:
+        score += 0.15
+    elif comms >= 1:
+        score += 0.08
+
+    rev = features.get("revenue_30d", 0.0)
+    if rev > 20000:
+        score += 0.20
+    elif rev > 5000:
+        score += 0.10
+
+    ctr = features.get("ctr_trend_pct", 0.0)
+    if ctr > 2.0:
+        score += 0.20
+    elif ctr > 0:
+        score += 0.10
+
+    # expansion_interest: check churn_signal_count inverse as proxy
+    # (positive_signal_count already covers expansion_interest tags)
+    if pos_sigs >= 1:
+        score += 0.15
+
+    trend = features.get("sentiment_trend", 0.0)
+    if trend > 0.1:
+        score += 0.10
+
+    return min(1.0, max(0.0, score))
+
+
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def train(save: bool = True) -> XGBClassifier:
+def train_growth_model(df: pd.DataFrame) -> XGBClassifier:
     """
-    Build features, generate synthetic labels, train growth model.
+    Train XGBoost growth potential classifier.
+
+    Target: 1 if status == 'high_growth', else 0.
+    Saves model to GROWTH_MODEL_PATH.
+
+    Parameters
+    ----------
+    df : DataFrame from get_feature_dataframe() — index = affiliate_id,
+         must contain 'status' column and all FEATURE_NAMES columns.
+
+    Returns
+    -------
+    Trained XGBClassifier.
     """
     global _model
-    print("[growth_model] Building feature matrix …")
-    df = build_features()
-    df = generate_synthetic_labels(df)
 
-    if df.empty:
-        raise ValueError("No training data found. Run the ETL pipeline first.")
+    df = df.reset_index()
+    y = (df["status"] == "high_growth").astype(int)
+    X = df[FEATURE_NAMES].fillna(0)
 
-    feat_cols = feature_columns()
-    X = df[feat_cols].fillna(0)
-    y = df["growth_label"]
+    print(f"[growth_model] Training on {len(df)} samples | growth rate: {y.mean():.1%}")
 
-    print(f"[growth_model] Training on {len(df)} samples | growth rate: {y.mean():.2%}")
+    model = XGBClassifier(**_XGBOOST_PARAMS)
+    model.fit(X, y, verbose=False)
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=99, stratify=y if y.sum() > 1 else None
-    )
-
-    model = XGBClassifier(**XGBOOST_PARAMS)
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_test, y_test)],
-        verbose=False,
-    )
-
-    # Evaluation
-    y_prob = model.predict_proba(X_test)[:, 1]
-    try:
-        auc = roc_auc_score(y_test, y_prob)
-        print(f"[growth_model] Test AUC: {auc:.4f}")
-    except ValueError:
-        print("[growth_model] AUC not computable (single class in test split)")
-
-    if len(set(y_test)) > 1:
-        y_pred = model.predict(X_test)
-        print(classification_report(y_test, y_pred, target_names=["flat", "growth"]))
-
-    if save:
-        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        model.save_model(str(MODEL_PATH))
-        print(f"[growth_model] Model saved: {MODEL_PATH}")
+    GROWTH_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, GROWTH_MODEL_PATH)
+    print(f"[growth_model] Saved → {GROWTH_MODEL_PATH}")
 
     _model = model
     return model
@@ -107,55 +126,46 @@ def train(save: bool = True) -> XGBClassifier:
 
 # ─── Inference ────────────────────────────────────────────────────────────────
 
-def _load_model() -> XGBClassifier:
+def _load_saved_model() -> Optional[XGBClassifier]:
     global _model
-    if _model is None:
-        if not MODEL_PATH.exists():
-            print(f"[growth_model] Model not found at {MODEL_PATH} — training now …")
-            return train()
-        _model = XGBClassifier()
-        _model.load_model(str(MODEL_PATH))
-        print(f"[growth_model] Model loaded from {MODEL_PATH}")
-    return _model
+    if _model is not None:
+        return _model
+    if GROWTH_MODEL_PATH.exists():
+        _model = joblib.load(GROWTH_MODEL_PATH)
+        return _model
+    return None
 
 
-def predict(affiliate_ids: Optional[list[str]] = None) -> pd.DataFrame:
+def predict_growth_potential(
+    affiliate_id: str,
+    features: dict,
+    model: Optional[XGBClassifier] = None,
+    db=None,
+) -> float:
     """
-    Predict growth_potential_score for one or all affiliates.
+    Predict growth_potential_score for one affiliate.
 
-    Returns DataFrame with columns: affiliate_id, growth_potential_score, features
+    Uses XGBoost if a saved model exists; falls back to rule-based scorer.
+
+    Parameters
+    ----------
+    affiliate_id : UUID string (used for logging only)
+    features     : dict from build_feature_vector()
+    model        : pre-loaded XGBClassifier (optional)
+    db           : unused; kept for signature compatibility
+
+    Returns
+    -------
+    float in [0.0, 1.0]
     """
-    model = _load_model()
-    df = build_features(affiliate_ids=affiliate_ids)
+    if model is None:
+        model = _load_saved_model()
 
-    if df.empty:
-        return pd.DataFrame(columns=["affiliate_id", "growth_potential_score", "features"])
+    if model is not None:
+        try:
+            X = pd.DataFrame([features])[FEATURE_NAMES].fillna(0)
+            return float(model.predict_proba(X)[0, 1])
+        except Exception as exc:
+            print(f"[growth_model] XGBoost predict failed ({exc}), using rules")
 
-    feat_cols = feature_columns()
-    X = df[feat_cols].fillna(0)
-    probs = model.predict_proba(X)[:, 1]
-
-    result = df[["affiliate_id"]].copy()
-    result["growth_potential_score"] = np.round(probs, 4)
-    result["features"] = X.to_dict(orient="records")
-    return result
-
-
-def predict_one(affiliate_id: str) -> dict:
-    """Return growth_potential_score + feature dict for a single affiliate."""
-    df = predict([affiliate_id])
-    if df.empty:
-        return {"affiliate_id": affiliate_id, "growth_potential_score": 0.5, "features": {}}
-    row = df.iloc[0]
-    return {
-        "affiliate_id": row["affiliate_id"],
-        "growth_potential_score": float(row["growth_potential_score"]),
-        "features": row["features"],
-    }
-
-
-if __name__ == "__main__":
-    model = train()
-    results = predict()
-    print("\nGrowth scores:")
-    print(results[["affiliate_id", "growth_potential_score"]].to_string())
+    return calculate_growth_potential_rules(features)

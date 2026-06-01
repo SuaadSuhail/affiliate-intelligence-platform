@@ -5,9 +5,9 @@ Endpoints for training models, running scoring, and explaining predictions.
 
 POST /ml/train                  — train churn + growth XGBoost models
 POST /ml/score                  — score all affiliates and persist results
-GET  /ml/scores                 — list current affiliate scores
+GET  /ml/scores                 — list current affiliate scores (worst first)
 GET  /ml/explain/{affiliate_id} — SHAP feature importance for one affiliate
-GET  /ml/dashboard              — aggregate health stats across all affiliates
+GET  /ml/dashboard              — portfolio health summary + full scores list
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from src.storage.database import get_db
+from src.storage.database import get_db, db_session
 from src.storage.models import Affiliate, ScoreHistory
 
 router = APIRouter()
@@ -30,11 +30,14 @@ router = APIRouter()
 class TrainResult(BaseModel):
     churn_model: str
     growth_model: str
+    samples_used: int
 
 
 class ScoreResult(BaseModel):
     affiliates_scored: int
-    score_history_entries: int
+    avg_health_score: float
+    at_risk_count: int
+    high_growth_count: int
 
 
 class AffiliateScore(BaseModel):
@@ -45,49 +48,68 @@ class AffiliateScore(BaseModel):
     health_score: float
 
 
+class ShapFactor(BaseModel):
+    feature: str
+    shap_value: float
+    feature_value: float
+    direction: str
+
+
+class ShapExplanation(BaseModel):
+    affiliate_id: str
+    model_type: str
+    base_value: float
+    prediction: float
+    top_factors: list[ShapFactor]
+    note: Optional[str] = None
+
+
 class ExplainResult(BaseModel):
     affiliate_id: str
-    churn_drivers: list[str]
-    growth_drivers: list[str]
-    churn_shap: dict
-    growth_shap: dict
+    churn: ShapExplanation
+    growth: ShapExplanation
 
 
 class DashboardStats(BaseModel):
     total_affiliates: int
     avg_health_score: float
-    avg_churn_risk: float
-    avg_growth_potential: float
-    high_risk_count: int       # churn_risk_score > 0.7
-    high_growth_count: int     # growth_potential_score > 0.7
-    score_history_entries: int
+    at_risk_count: int
+    high_growth_count: int
+    churned_count: int
+    scores: list[AffiliateScore]
 
 
 # ─── Train ────────────────────────────────────────────────────────────────────
 
 @router.post("/train", response_model=TrainResult)
-def train_models() -> TrainResult:
+def train_models(db: Session = Depends(get_db)) -> TrainResult:
     """
-    Train both XGBoost models (churn + growth) on the current affiliate data.
-    Saves model artefacts to models/churn_model.json and models/growth_model.json.
-    Requires at least one affiliate in the database.
+    Train both XGBoost models (churn + growth) on current affiliate data.
+    Saves artefacts to models/churn_model.pkl and models/growth_model.pkl.
     """
-    from src.ml.churn_model import train as train_churn
-    from src.ml.growth_model import train as train_growth
+    from src.ml.feature_engineering import get_feature_dataframe
+    from src.ml.churn_model import train_churn_model
+    from src.ml.growth_model import train_growth_model
+
+    df = get_feature_dataframe(db)
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No affiliate data found. Run /ingest/full first.")
+
+    n = len(df)
 
     try:
-        train_churn(save=True)
+        train_churn_model(df)
         churn_status = "trained"
     except Exception as exc:
         churn_status = f"error: {exc}"
 
     try:
-        train_growth(save=True)
+        train_growth_model(df)
         growth_status = "trained"
     except Exception as exc:
         growth_status = f"error: {exc}"
 
-    return TrainResult(churn_model=churn_status, growth_model=growth_status)
+    return TrainResult(churn_model=churn_status, growth_model=growth_status, samples_used=n)
 
 
 # ─── Score ────────────────────────────────────────────────────────────────────
@@ -95,62 +117,20 @@ def train_models() -> TrainResult:
 @router.post("/score", response_model=ScoreResult)
 def score_all_affiliates(db: Session = Depends(get_db)) -> ScoreResult:
     """
-    Run churn + growth prediction for every affiliate and persist results.
-
-    Updates affiliates.churn_risk_score, growth_potential_score, health_score
-    and appends a new ScoreHistory row for each affiliate.
-    Auto-trains models if model artefacts are not found.
+    Score all affiliates using rule-based or XGBoost model (whichever is available).
+    Updates churn_risk_score, growth_potential_score, health_score in PostgreSQL
+    and appends to score_history. Skips affiliates already scored today.
     """
-    from src.ml.churn_model import predict as churn_predict
-    from src.ml.growth_model import predict as growth_predict
+    from src.ml.score_updater import update_all_scores
 
     try:
-        churn_df = churn_predict()
+        result = update_all_scores(db)
+        db.commit()
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Churn prediction error: {exc}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Scoring error: {exc}")
 
-    try:
-        growth_df = growth_predict()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Growth prediction error: {exc}")
-
-    # Merge on affiliate_id
-    merged = churn_df.merge(growth_df[["affiliate_id", "growth_potential_score"]], on="affiliate_id", how="inner")
-
-    updates = 0
-    history_entries = 0
-    for _, row in merged.iterrows():
-        try:
-            aff_uuid = _uuid.UUID(str(row["affiliate_id"]))
-        except ValueError:
-            continue
-
-        aff = db.query(Affiliate).filter(Affiliate.id == aff_uuid).first()
-        if not aff:
-            continue
-
-        c_score = float(row["churn_risk_score"])
-        g_score = float(row["growth_potential_score"])
-        h_score = round(((1 - c_score) * 0.6 + g_score * 0.4) * 100, 1)
-
-        aff.churn_risk_score = c_score
-        aff.growth_potential_score = g_score
-        aff.health_score = h_score
-        updates += 1
-
-        entry = ScoreHistory(
-            affiliate_id=aff.id,
-            churn_risk_score=c_score,
-            growth_potential_score=g_score,
-            health_score=h_score,
-            features=row.get("features", {}) if isinstance(row.get("features"), dict) else {},
-            shap_values={},
-        )
-        db.add(entry)
-        history_entries += 1
-
-    db.commit()
-    return ScoreResult(affiliates_scored=updates, score_history_entries=history_entries)
+    return ScoreResult(**result)
 
 
 # ─── Scores list ──────────────────────────────────────────────────────────────
@@ -160,10 +140,12 @@ def get_scores(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> list[AffiliateScore]:
-    """Return current churn/growth/health scores for all affiliates, sorted by health score."""
+    """
+    Return affiliate scores sorted by health_score ascending — worst affiliates first.
+    """
     affiliates = (
         db.query(Affiliate)
-        .order_by(Affiliate.health_score.desc())
+        .order_by(Affiliate.health_score.asc())
         .limit(limit)
         .all()
     )
@@ -171,9 +153,9 @@ def get_scores(
         AffiliateScore(
             affiliate_id=str(a.id),
             name=a.name,
-            churn_risk_score=a.churn_risk_score or 0.5,
-            growth_potential_score=a.growth_potential_score or 0.5,
-            health_score=a.health_score or 50.0,
+            churn_risk_score=round(a.churn_risk_score or 0.5, 4),
+            growth_potential_score=round(a.growth_potential_score or 0.5, 4),
+            health_score=round(a.health_score or 50.0, 1),
         )
         for a in affiliates
     ]
@@ -184,8 +166,8 @@ def get_scores(
 @router.get("/explain/{affiliate_id}", response_model=ExplainResult)
 def explain(affiliate_id: str, db: Session = Depends(get_db)) -> ExplainResult:
     """
-    Return SHAP-based feature importances for one affiliate.
-    Identifies which features are driving their churn risk and growth potential scores.
+    Return SHAP-based feature importances for one affiliate (churn + growth).
+    Requires models to be trained first via POST /ml/train.
     """
     try:
         _uuid.UUID(affiliate_id)
@@ -196,34 +178,29 @@ def explain(affiliate_id: str, db: Session = Depends(get_db)) -> ExplainResult:
     if not aff:
         raise HTTPException(status_code=404, detail=f"Affiliate {affiliate_id} not found")
 
-    from src.ml.explainability import explain_affiliate, top_risk_drivers
+    from src.ml.feature_engineering import build_feature_vector
+    from src.ml.explainability import get_shap_explanation
 
-    try:
-        churn_shap = explain_affiliate(affiliate_id, model_type="churn")
-    except Exception as exc:
-        churn_shap = {"error": str(exc)}
+    features = build_feature_vector(affiliate_id, db)
 
-    try:
-        growth_shap = explain_affiliate(affiliate_id, model_type="growth")
-    except Exception as exc:
-        growth_shap = {"error": str(exc)}
+    churn_exp = get_shap_explanation(affiliate_id, features, "churn")
+    growth_exp = get_shap_explanation(affiliate_id, features, "growth")
 
-    try:
-        churn_drivers = top_risk_drivers(affiliate_id, model_type="churn")
-    except Exception:
-        churn_drivers = []
-
-    try:
-        growth_drivers = top_risk_drivers(affiliate_id, model_type="growth")
-    except Exception:
-        growth_drivers = []
+    def _to_shap(raw: dict) -> ShapExplanation:
+        factors = [ShapFactor(**f) for f in raw.get("top_factors", [])]
+        return ShapExplanation(
+            affiliate_id=raw["affiliate_id"],
+            model_type=raw["model_type"],
+            base_value=raw.get("base_value", 0.0),
+            prediction=raw.get("prediction", 0.0),
+            top_factors=factors,
+            note=raw.get("note"),
+        )
 
     return ExplainResult(
         affiliate_id=affiliate_id,
-        churn_drivers=churn_drivers,
-        growth_drivers=growth_drivers,
-        churn_shap=churn_shap if isinstance(churn_shap, dict) else {},
-        growth_shap=growth_shap if isinstance(growth_shap, dict) else {},
+        churn=_to_shap(churn_exp),
+        growth=_to_shap(growth_exp),
     )
 
 
@@ -232,35 +209,43 @@ def explain(affiliate_id: str, db: Session = Depends(get_db)) -> ExplainResult:
 @router.get("/dashboard", response_model=DashboardStats)
 def dashboard(db: Session = Depends(get_db)) -> DashboardStats:
     """
-    Return aggregate health statistics across all affiliates.
-    Use this to get a quick overview of the affiliate portfolio health.
+    Portfolio health summary with full scores list.
+    Shows at_risk, high_growth, and churned affiliate counts.
     """
-    affiliates = db.query(Affiliate).all()
+    affiliates = db.query(Affiliate).order_by(Affiliate.health_score.asc()).all()
+
     if not affiliates:
         return DashboardStats(
             total_affiliates=0,
             avg_health_score=0.0,
-            avg_churn_risk=0.0,
-            avg_growth_potential=0.0,
-            high_risk_count=0,
+            at_risk_count=0,
             high_growth_count=0,
-            score_history_entries=db.query(ScoreHistory).count(),
+            churned_count=0,
+            scores=[],
         )
 
     n = len(affiliates)
     avg_health = round(sum(a.health_score or 50.0 for a in affiliates) / n, 1)
-    avg_churn = round(sum(a.churn_risk_score or 0.5 for a in affiliates) / n, 4)
-    avg_growth = round(sum(a.growth_potential_score or 0.5 for a in affiliates) / n, 4)
-    high_risk = sum(1 for a in affiliates if (a.churn_risk_score or 0.5) > 0.7)
-    high_growth = sum(1 for a in affiliates if (a.growth_potential_score or 0.5) > 0.7)
-    history_count = db.query(ScoreHistory).count()
+    at_risk = sum(1 for a in affiliates if (a.churn_risk_score or 0.5) > 0.5)
+    high_growth = sum(1 for a in affiliates if (a.growth_potential_score or 0.5) > 0.5)
+    churned = sum(1 for a in affiliates if (a.churn_risk_score or 0.5) > 0.8)
+
+    scores = [
+        AffiliateScore(
+            affiliate_id=str(a.id),
+            name=a.name,
+            churn_risk_score=round(a.churn_risk_score or 0.5, 4),
+            growth_potential_score=round(a.growth_potential_score or 0.5, 4),
+            health_score=round(a.health_score or 50.0, 1),
+        )
+        for a in affiliates
+    ]
 
     return DashboardStats(
         total_affiliates=n,
         avg_health_score=avg_health,
-        avg_churn_risk=avg_churn,
-        avg_growth_potential=avg_growth,
-        high_risk_count=high_risk,
+        at_risk_count=at_risk,
         high_growth_count=high_growth,
-        score_history_entries=history_count,
+        churned_count=churned,
+        scores=scores,
     )

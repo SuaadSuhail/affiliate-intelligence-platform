@@ -163,21 +163,37 @@ Used for: finding similar affiliates, clustering, agent profile lookups.
 
 ## 5. ML Model Architecture
 
+### Design principle
+With only 10 affiliates, XGBoost cannot be relied on as a primary predictor.
+The system uses **rule-based scoring as primary** and XGBoost as secondary
+(activated after `POST /ml/train`).
+
+### Feature vector (12 features — see § 12 for full details)
+Activity: `days_since_contact`, `revenue_30d`, `ctr_trend_pct`
+Communication (30d): `avg_sentiment_30d`, `comm_count_30d`, tag counts (5 features)
+Derived: `sentiment_trend`, `response_rate`, `days_since_positive`
+
 ### Churn Model (`churn_model.py`)
-- **Algorithm**: XGBoostClassifier
-- **Target**: `churn_risk_score` (binary label: churned within 90 days)
-- **Key features**: days_since_last_contact, churn_signal_count, satisfaction_low_count,
-  competitor_mention_count, payment_issue_count, escalation_risk_count,
-  avg_sentiment_score (30d), comm_frequency_decline_ratio, days_since_join,
-  monthly_revenue, tier_encoded
+- **Primary**: `calculate_churn_risk_rules(features)` — weighted rule-based scorer
+- **Secondary**: `train_churn_model(df)` → XGBClassifier (n_estimators=50, max_depth=3)
+- **Target**: `status in ['at_risk', 'churned']` (derived from `churn_risk_score > 0.7`)
+- **Artefact**: `models/churn_model.pkl`
 
 ### Growth Model (`growth_model.py`)
-- **Algorithm**: XGBoostClassifier
-- **Target**: `growth_potential_score` (binary label: revenue grew ≥ 20% in 90 days)
-- **Key features**: growth_intent_count, new_opportunity_count, satisfaction_high_count,
-  high_engagement_count, seasonal_pattern_count, feature_request_count,
-  avg_sentiment_score (30d), comm_frequency_growth_ratio, monthly_revenue,
-  tier_encoded, relationship_warm_count
+- **Primary**: `calculate_growth_potential_rules(features)` — weighted rule-based scorer
+- **Secondary**: `train_growth_model(df)` → XGBClassifier (same params)
+- **Target**: `status == 'high_growth'` (derived from `growth_potential_score > 0.7`)
+- **Artefact**: `models/growth_model.pkl`
+
+### Explainability (`explainability.py`)
+- SHAP TreeExplainer on the XGBoost model
+- `get_shap_explanation()` returns top 5 factors with `{feature, shap_value, feature_value, direction}`
+- Falls back to rule-based prediction summary if model not trained
+
+### Score updater (`score_updater.py`)
+- `update_all_scores(db)` — runs the full pipeline for every affiliate
+- Health score: `round(((1 - churn_risk) × 0.6 + growth × 0.4) × 100, 1)`
+- Idempotent within a day (skips affiliates already scored today)
 
 ---
 
@@ -427,20 +443,39 @@ ChromaDB. Also callable via `POST /process/embeddings`.
 | | |
 |---|---|
 | **Status** | Complete |
-| **Files** | `src/ml/churn_model.py`, `src/ml/growth_model.py`, `src/ml/feature_engineering.py`, `src/ml/explainability.py` |
+| **Files** | `src/ml/feature_engineering.py`, `src/ml/churn_model.py`, `src/ml/growth_model.py`, `src/ml/explainability.py`, `src/ml/score_updater.py` |
+| **Tests** | `tests/test_ml.py` — 5 tests, all passing |
 
-**What it does:**
-- `feature_engineering.py` — builds feature matrix from PostgreSQL (tag counts, sentiment,
-  revenue, days_since_contact, tier encoding); generates synthetic training labels
-- `churn_model.py` — XGBoost classifier → `churn_risk_score` (0–1); auto-trains if
-  no model artefact found
-- `growth_model.py` — XGBoost classifier → `growth_potential_score` (0–1)
-- `explainability.py` — SHAP values per affiliate; `explain_affiliate()`,
-  `top_risk_drivers()`, `explain_all()`
+**Features (12 total across 3 groups):**
 
-**Artefacts:** `models/churn_model.json`, `models/growth_model.json` (never committed)
+| Group | Features |
+|---|---|
+| Activity | `days_since_contact`, `revenue_30d`, `ctr_trend_pct` |
+| Communication (30d) | `avg_sentiment_30d`, `comm_count_30d`, `churn_signal_count`, `positive_signal_count`, `escalation_count`, `competitor_mention_count` |
+| Derived | `sentiment_trend`, `response_rate`, `days_since_positive` |
 
-**API:** `POST /ml/train`, `POST /ml/score`, `GET /ml/scores`,
+**What each file does:**
+- `feature_engineering.py` — `build_feature_vector(affiliate_id, db)` computes all 12 features
+  for one affiliate; `build_all_features(db)` iterates all affiliates; `get_feature_dataframe(db)`
+  returns a pandas DataFrame indexed by `affiliate_id`
+- `churn_model.py` — `calculate_churn_risk_rules(features)` (rule-based, always available) +
+  `train_churn_model(df)` (XGBoost, saved to `models/churn_model.pkl`) +
+  `predict_churn_risk(affiliate_id, features)` (uses XGBoost if model exists, rules as fallback)
+- `growth_model.py` — identical structure for `growth_potential_score`;
+  `calculate_growth_potential_rules()`, `train_growth_model()`, `predict_growth_potential()`
+- `explainability.py` — `get_shap_explanation(affiliate_id, features, model_type)` returns
+  `{affiliate_id, model_type, base_value, prediction, top_factors[5]}` with per-factor
+  `{feature, shap_value, feature_value, direction}`;
+  also exposes legacy `explain_affiliate()` and `top_risk_drivers()` for router compatibility
+- `score_updater.py` — `update_all_scores(db)` scores every affiliate, writes results to
+  `affiliates` table and inserts into `score_history`; skips affiliates already scored today
+
+**Important design decision:** With only 10 affiliates, XGBoost produces unreliable predictions.
+Rule-based scorers are the primary method; XGBoost is secondary (activated after `POST /ml/train`).
+
+**Artefacts:** `models/churn_model.pkl`, `models/growth_model.pkl` — tracked in `.gitignore`, never committed
+
+**API:** `POST /ml/train`, `POST /ml/score`, `GET /ml/scores` (worst-first),
 `GET /ml/explain/{id}`, `GET /ml/dashboard`
 
 ---

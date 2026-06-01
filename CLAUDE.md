@@ -279,10 +279,15 @@ See `.env.example` for all required variables. Never commit `.env`.
 docker compose up -d                          # start PostgreSQL + ChromaDB
 conda activate affiliate-intelligence         # or: pip install -r requirements.txt
 python -m spacy download en_core_web_sm
-python src/ingestion/etl_pipeline.py          # seed mock data (10 affiliates, 14 comms)
 uvicorn src.api.main:app --port 8080 --reload # start API on :8080
-curl -X POST http://localhost:8080/process/nlp        # tag all communications
+
+# Full pipeline — run in order:
+curl -X POST http://localhost:8080/ingest/full       # seed 10 affiliates + 7 comms
+curl -X POST http://localhost:8080/process/nlp       # tag all 7 communications
 curl -X POST http://localhost:8080/process/embeddings # embed all communications
+curl -X POST http://localhost:8080/ml/train          # train XGBoost models
+curl -X POST http://localhost:8080/ml/score          # score all affiliates
+curl http://localhost:8080/ml/dashboard              # verify pipeline state
 ```
 
 ---
@@ -306,10 +311,15 @@ PERSIST_DIRECTORY=/chroma/chroma
 **app environment:**
 ```
 CHROMA_HOST=chromadb
-CHROMA_PORT=8001
+CHROMA_PORT=8000    ← container-to-container port (NOT 8001 which is the Mac host port)
 DATABASE_URL=postgresql://...@postgres:5432/affiliate_intelligence
 OPENAI_API_KEY=...
 ```
+
+> **Docker networking:** `CHROMA_PORT=8000` inside Docker because container-to-container
+> traffic goes directly to ChromaDB's internal port. `8001` is the *host* port mapping
+> used only from the Mac terminal. `vector_store.py` connects to `http://chromadb:8000`
+> inside Docker, and `http://localhost:8001` from the Mac terminal.
 
 ### Known fixes — permanently committed to git
 
@@ -446,20 +456,25 @@ On startup it logs the total registered route count. Endpoint logic lives in
 | **Status** | Complete |
 | **File** | `src/ingestion/etl_pipeline.py` |
 
-**What it does:** Reads mock CSV and flat-text files from `data/mock/`, runs NLP tagging
-inline (`process_text()`), generates embeddings via `EmbeddingGenerator`, and upserts
-everything into PostgreSQL and ChromaDB. `run_full_pipeline()` is the single entry point.
+**What it does:** Loads raw data into PostgreSQL only. NLP tagging and embedding
+generation are separate steps (`POST /process/nlp`, `POST /process/embeddings`).
+- `ingest_affiliates_csv(path)` — upserts Affiliate rows by **name** (no email column in new schema); maps `monthly_revenue → revenue_30d`; derives `status` from churn/growth scores; computes `days_since_contact`
+- `ingest_communications_file(path)` — inserts Communication rows with `raw_text` and `source` (mapped from block `channel`); leaves `tags=[]` and `sentiment_score=0.0`
+- `run_full_pipeline()` — calls both in order (3 steps: init DB, affiliates, comms)
 
 **Key functions:** `run_full_pipeline()`, `ingest_affiliates_csv(path)`,
-`ingest_communications_file(path)`, `index_affiliate_profiles()`, `ingest_csv_content(csv_str)`
+`ingest_communications_file(path)`, `ingest_csv_content(csv_str)`
 
-**Output:** 10 affiliates + 14 communications in PostgreSQL; affiliate profiles in ChromaDB
+**Output:** 10 affiliates + 7 communications in PostgreSQL (raw text only, no tags)
 
-**Idempotent:** upserts by email (affiliates); creates new comm rows on each run
+**Idempotent:** upserts by name (affiliates); creates new comm rows on each run
 
 **Fixes applied:**
-- Non-UUID IDs in mock CSV (`aff-001`) now handled gracefully — falls back to `uuid4()`
-- Offset-aware vs offset-naive datetime comparison fixed in `last_contact_date` update
+- Removed `process_text` import — ETL and NLP are separate steps
+- Removed `get_generator` / `EmbeddingGenerator` imports — embeddings are a separate step
+- New schema fields: `raw_text` (not `content`), `source` (not `channel`), `last_contact_at` (not `last_contact_date`), no `direction`/`subject`/`sentiment_label`
+- Non-UUID mock IDs (`aff-001`) handled gracefully — falls back to `uuid4()`
+- `_find_affiliate_by_mock_id` now looks up by name (email column removed from schema)
 
 ---
 
@@ -582,19 +597,34 @@ Rule-based scorers are the primary method; XGBoost is secondary (activated after
 
 | File | Fix |
 |---|---|
-| `src/storage/vector_store.py` | Removed `chromadb.auth.token.TokenAuthClientProvider` — module does not exist in chromadb ≥ 1.0; client now connects without auth settings |
-| `src/ingestion/etl_pipeline.py` | Handle non-UUID IDs in mock CSV gracefully; fix offset-aware vs offset-naive datetime comparison |
-| `docker-compose.yml` | Removed `version:` attribute, all `CHROMA_SERVER_AUTH_*` env vars, and chromadb healthcheck; `app` chromadb dependency changed to `service_started`; app port fixed to `8080`, `CHROMA_PORT` fixed to `8001` |
+| `src/storage/vector_store.py` | Removed `chromadb.auth.token.TokenAuthClientProvider` — module does not exist in chromadb ≥ 1.0; client connects without auth |
+| `docker-compose.yml` | Removed `version:` attribute, all `CHROMA_SERVER_AUTH_*` env vars, and chromadb healthcheck; `app` dependency changed to `service_started`; app port `8080`, `CHROMA_PORT=8001` for host access |
+| `docker-compose.yml` (networking) | `CHROMA_PORT` inside Docker containers must be `8000` (internal), not `8001` (host mapping). See § 10 Docker networking note. |
+
+### Pipeline fixes (post-merge)
+
+Applied after merging `feature/nlp-tagging` and `feature/ml-models` into `develop`.
+These files had stale imports and old schema field names that caused runtime failures:
+
+| File | Fix |
+|---|---|
+| `src/api/routers/process.py` | Replaced `process_text` import with `process_all_communications`; replaced `get_generator()` loop with `embed_all_communications(db, vs)` — old functions no longer exist after the nlp-tagging merge |
+| `src/ingestion/etl_pipeline.py` | Removed stale `process_text` and `get_generator` imports; rewrote for new schema: `raw_text` (not `content`), `source` (not `channel`), removed `direction`/`subject`/`sentiment_label`; upserts by `name` (no `email` column); `last_contact_at` not `last_contact_date` |
+| `src/ml/feature_engineering.py` | Fixed `aff.last_contact_date` → `aff.last_contact_at`; replaced `c.direction` reference (field removed from schema) with a `response_rate` proxy calculation |
+| `src/ml/score_updater.py` | Removed `features`, `shap_values`, `model_version` from `ScoreHistory` constructor — those columns were removed in the new `score_history` schema |
 
 ---
 
-### Current data state
+### Current verified pipeline state
 
-| | |
-|---|---|
-| Affiliates in PostgreSQL | 10 |
-| Communications in PostgreSQL | 14 (expanded mock data) |
-| Communications tagged | 14 / 14 |
-| Communications embedded | 14 / 14 |
-| ChromaDB collection | `communications_embeddings` + `affiliate_profiles` |
-| Semantic search | Working via `GET /search` |
+Full end-to-end pipeline tested and working on `develop` branch:
+
+| Step | Endpoint | Result |
+|---|---|---|
+| Ingest | `POST /ingest/full` | 10 affiliates + 7 communications loaded |
+| NLP | `POST /process/nlp` | 7/7 communications tagged |
+| Embeddings | `POST /process/embeddings` | 7 embedded, 13 chunks in ChromaDB |
+| Train | `POST /ml/train` | Both XGBoost models trained (10 samples) |
+| Score | `POST /ml/score` | 10 affiliates scored |
+| Dashboard | `GET /ml/dashboard` | `total_affiliates: 10`, `score_history_entries: 10` |
+| Routes | `GET /openapi.json` | All 21 routes registered |

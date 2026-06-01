@@ -253,7 +253,68 @@ curl -X POST http://localhost:8080/process/nlp # tag all communications
 
 ---
 
-## 10. Git Conventions
+## 10. Infrastructure
+
+### Docker services
+
+| Service | Image | Host port | Notes |
+|---|---|---|---|
+| `postgres` | `postgres:16-alpine` | `5432` | healthcheck: `pg_isready` |
+| `chromadb` | `chromadb/chroma:latest` | `8001` | container internal port 8000; NO auth; NO healthcheck |
+| `app` | custom build | `8080` | depends on postgres (healthy) + chromadb (started) |
+
+**chromadb environment (only these two):**
+```
+IS_PERSISTENT=TRUE
+PERSIST_DIRECTORY=/chroma/chroma
+```
+
+**app environment:**
+```
+CHROMA_HOST=chromadb
+CHROMA_PORT=8001
+DATABASE_URL=postgresql://...@postgres:5432/affiliate_intelligence
+OPENAI_API_KEY=...
+```
+
+### Known fixes applied
+
+- **chromadb 1.5.9 does not support token auth** — never add `CHROMA_SERVER_AUTH_*`
+  variables to the chromadb service. The `chromadb.auth.token` module does not exist
+  in chromadb ≥ 1.0 and causes the container to fail on startup.
+- **chromadb healthcheck removed** — the container starts successfully but fails the
+  `curl /api/v1/heartbeat` check (v1 API path is gone in chromadb ≥ 1.0). No
+  healthcheck is defined; app uses `service_started` instead of `service_healthy`.
+- **Port conflict resolved** — app runs on `8080`, chromadb is exposed on host port
+  `8001` (maps to container port `8000`). Never use `8000` for the app.
+- **`version:` attribute removed** — the top-level `version: "3.9"` key is obsolete
+  in Docker Compose v2 and causes a warning; omit it entirely.
+
+### Daily startup sequence
+
+```bash
+# 1. Start Docker Desktop (if not already running)
+# 2. Start containers
+docker compose up -d
+
+# 3. Activate Python environment
+conda activate affiliate-intelligence
+
+# 4. Verify all containers are up
+docker compose ps
+```
+
+Expected output from `docker compose ps`:
+```
+NAME            STATUS          PORTS
+aip_postgres    Up (healthy)    0.0.0.0:5432->5432/tcp
+aip_chromadb    Up              0.0.0.0:8001->8000/tcp
+aip_app         Up              0.0.0.0:8080->8080/tcp
+```
+
+---
+
+## 11. Git Conventions
 
 ### Branch strategy
 
@@ -296,7 +357,7 @@ feat(agent): add draft_email tool to LangChain agent
 
 ---
 
-## 11. Built Modules
+## 12. Built Modules
 
 ### Storage layer
 

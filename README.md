@@ -246,4 +246,4 @@ pytest tests/ -v
 
 ## Background
 
-This project was developed as a Knowledge Transfer Partnership demonstrating how agentic AI can augment affiliate relationship management. The system integrates classical machine learning, modern NLP pipelines, and large language model tool use into a single cohesive platform. The architecture is intentionally modular — each layer (ingestion, NLP, ML, agent) can be extended or replaced independently without touching the others.
+This project was built to demonstrate the application of agentic AI to affiliate relationship management. It combines classical machine learning, large language models, and semantic search into a unified system that enables proactive, data-driven decision making across an affiliate partner portfolio.

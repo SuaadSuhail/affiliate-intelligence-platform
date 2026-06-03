@@ -1,35 +1,24 @@
 """
 FastAPI Application
 ===================
-REST API for the Affiliate Intelligence Platform.
+REST API + HTML frontend for the Affiliate Intelligence Platform.
 
 Endpoints
 ---------
-GET  /health                          — service health check
-GET  /affiliates                      — list all affiliates with scores
-GET  /affiliates/{id}                 — single affiliate + score history
-GET  /affiliates/{id}/communications  — paginated communications for one affiliate
-POST /affiliates/{id}/score           — trigger re-scoring for one affiliate
-POST /agent/chat                      — chat with the LangChain ReAct agent
+GET  /                            — chat UI (served from templates/index.html)
+GET  /health                      — service health check
+GET  /affiliates                  — list affiliates (new schema)
+GET  /affiliates/{id}             — single affiliate + score history
+GET  /affiliates/{id}/communications — paginated communications
+POST /affiliates/{id}/score       — trigger re-scoring
 
-POST /ingest/full                     — run full ETL from mock data files
-POST /ingest/affiliates               — re-ingest affiliates CSV
-POST /ingest/communications           — re-ingest emails + transcripts
-POST /ingest/csv                      — upload affiliates CSV file
-
-POST /process/nlp                     — tag all untagged communications
-POST /process/embeddings              — embed all unembedded communications
-POST /process/full                    — NLP + embeddings end-to-end
-
-GET  /communications                  — list all communications with tags
-GET  /communications/{id}             — single communication by UUID
-GET  /search                          — semantic search over communications
-
-POST /ml/train                        — train churn + growth XGBoost models
-POST /ml/score                        — score all affiliates and persist
-GET  /ml/scores                       — list current affiliate scores
-GET  /ml/explain/{affiliate_id}       — SHAP feature importances
-GET  /ml/dashboard                    — aggregate health statistics
+POST /ingest/full|affiliates|communications|csv
+POST /process/nlp|embeddings|full
+GET  /communications, /communications/{id}, /search
+POST /ml/train|score
+GET  /ml/scores|explain/{id}|dashboard
+POST /agent/chat|quick
+GET  /agent/demo
 
 Run:
     uvicorn src.api.main:app --port 8080 --reload
@@ -40,10 +29,14 @@ from __future__ import annotations
 import logging
 import uuid as _uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -57,6 +50,12 @@ from src.api.routers.process import router as process_router
 from src.api.routers.search import router as search_router
 from src.api.routers.ml import router as ml_router
 from src.api.routers.agent import router as agent_router
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+
+_BASE = Path(__file__).parent
+_STATIC_DIR = _BASE / "static"
+_TEMPLATES_DIR = _BASE / "templates"
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -81,6 +80,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Static files and templates
+_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
 # ─── Include routers ──────────────────────────────────────────────────────────
 
 app.include_router(ingest_router, prefix="/ingest", tags=["Ingestion"])
@@ -96,45 +102,45 @@ app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 async def startup_event() -> None:
     init_db()
     routes = [r.path for r in app.routes]
-    logger.info(f"Registered {len(routes)} routes: {routes}")
+    logger.info(f"Registered {len(routes)} routes")
     print(f"[startup] {len(routes)} routes registered.")
 
 
-# ─── Pydantic schemas ─────────────────────────────────────────────────────────
+# ─── Frontend ─────────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse, tags=["Frontend"])
+async def index(request: Request) -> HTMLResponse:
+    """Serve the main chat UI."""
+    return templates.TemplateResponse(request=request, name="index.html")
+
+
+# ─── Pydantic schemas (new schema) ────────────────────────────────────────────
 
 class AffiliateOut(BaseModel):
     id: str
     name: str
-    email: str
-    company: Optional[str]
-    tier: str
-    join_date: str
-    country: Optional[str]
-    niche: Optional[str]
-    traffic_source: Optional[str]
-    monthly_revenue: float
+    status: str
     churn_risk_score: float
     growth_potential_score: float
     health_score: float
-    last_contact_date: Optional[str]
+    revenue_30d: float
+    days_since_contact: int
+    last_contact_at: Optional[str]
 
     @classmethod
     def from_orm(cls, a: Affiliate) -> "AffiliateOut":
         return cls(
             id=str(a.id),
             name=a.name,
-            email=a.email,
-            company=a.company,
-            tier=a.tier,
-            join_date=str(a.join_date),
-            country=a.country,
-            niche=a.niche,
-            traffic_source=a.traffic_source,
-            monthly_revenue=a.monthly_revenue or 0.0,
-            churn_risk_score=a.churn_risk_score or 0.5,
-            growth_potential_score=a.growth_potential_score or 0.5,
-            health_score=a.health_score or 50.0,
-            last_contact_date=a.last_contact_date.isoformat() if a.last_contact_date else None,
+            status=a.status or "active",
+            churn_risk_score=round(a.churn_risk_score or 0.5, 4),
+            growth_potential_score=round(a.growth_potential_score or 0.5, 4),
+            health_score=round(a.health_score or 50.0, 1),
+            revenue_30d=float(a.revenue_30d or 0.0),
+            days_since_contact=int(a.days_since_contact or 0),
+            last_contact_at=(
+                a.last_contact_at.isoformat() if a.last_contact_at else None
+            ),
         )
 
 
@@ -143,8 +149,6 @@ class ScoreHistoryOut(BaseModel):
     churn_risk_score: float
     growth_potential_score: float
     health_score: float
-    shap_values: dict
-    model_version: str
     scored_at: str
 
     @classmethod
@@ -154,24 +158,12 @@ class ScoreHistoryOut(BaseModel):
             churn_risk_score=s.churn_risk_score,
             growth_potential_score=s.growth_potential_score,
             health_score=s.health_score,
-            shap_values=s.shap_values or {},
-            model_version=s.model_version,
             scored_at=s.scored_at.isoformat() if s.scored_at else "",
         )
 
 
 class AffiliateDetail(AffiliateOut):
     score_history: list[ScoreHistoryOut] = []
-
-
-class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-
-
-class ChatResponse(BaseModel):
-    response: str
-    session_id: Optional[str] = None
 
 
 class ScoreResponse(BaseModel):
@@ -199,7 +191,7 @@ def _get_affiliate_or_404(affiliate_id: str, db: Session) -> Affiliate:
 
 @app.get("/health", tags=["System"])
 def health() -> dict:
-    """Service health check — verifies PostgreSQL and ChromaDB connectivity."""
+    """Service health check — verifies PostgreSQL and ChromaDB."""
     from src.storage.vector_store import vector_store
     pg_ok = db_health()
     chroma_ok = vector_store.health_check()
@@ -215,8 +207,7 @@ def health() -> dict:
 
 @app.get("/affiliates", response_model=list[AffiliateOut], tags=["Affiliates"])
 def list_affiliates(
-    tier: Optional[str] = Query(None, description="Filter by tier: bronze|silver|gold|platinum"),
-    niche: Optional[str] = Query(None, description="Filter by niche (partial match)"),
+    status: Optional[str] = Query(None, description="Filter by status: active|at_risk|churned|high_growth"),
     min_health: Optional[float] = Query(None, description="Minimum health score"),
     max_churn: Optional[float] = Query(None, description="Maximum churn risk score"),
     sort_by: str = Query("health_score", description="Sort field"),
@@ -227,10 +218,8 @@ def list_affiliates(
 ) -> list[AffiliateOut]:
     """List all affiliates with optional filtering and sorting."""
     q = db.query(Affiliate)
-    if tier:
-        q = q.filter(Affiliate.tier == tier.lower())
-    if niche:
-        q = q.filter(Affiliate.niche.ilike(f"%{niche}%"))
+    if status:
+        q = q.filter(Affiliate.status == status.lower())
     if min_health is not None:
         q = q.filter(Affiliate.health_score >= min_health)
     if max_churn is not None:
@@ -256,11 +245,10 @@ def get_affiliate(
         .limit(20)
         .all()
     )
-    detail = AffiliateDetail(
+    return AffiliateDetail(
         **AffiliateOut.from_orm(aff).model_dump(),
         score_history=[ScoreHistoryOut.from_orm(s) for s in history],
     )
-    return detail
 
 
 @app.get(
@@ -270,7 +258,7 @@ def get_affiliate(
 )
 def get_affiliate_communications(
     affiliate_id: str,
-    channel: Optional[str] = Query(None, description="Filter: email|call|chat|ticket"),
+    source: Optional[str] = Query(None, description="Filter: email|call|api_event"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -282,18 +270,15 @@ def get_affiliate_communications(
         .filter(Communication.affiliate_id == aff.id)
         .order_by(Communication.occurred_at.desc())
     )
-    if channel:
-        q = q.filter(Communication.channel == channel.lower())
+    if source:
+        q = q.filter(Communication.source == source.lower())
     comms = q.offset(offset).limit(limit).all()
     return [
         {
             "id": str(c.id),
-            "channel": c.channel,
-            "direction": c.direction,
-            "subject": c.subject,
-            "content_preview": (c.content or "")[:200],
+            "source": c.source,
+            "raw_text_preview": (c.raw_text or "")[:200],
             "sentiment_score": c.sentiment_score,
-            "sentiment_label": c.sentiment_label,
             "tags": c.tags or [],
             "embedding_id": c.embedding_id,
             "occurred_at": c.occurred_at.isoformat() if c.occurred_at else None,
@@ -310,30 +295,28 @@ def score_affiliate(
     db: Session = Depends(get_db),
 ) -> ScoreResponse:
     """Trigger re-scoring for a single affiliate."""
-    from src.ml.churn_model import predict_one as churn_one
-    from src.ml.growth_model import predict_one as growth_one
+    from src.ml.feature_engineering import build_feature_vector
+    from src.ml.churn_model import predict_churn_risk
+    from src.ml.growth_model import predict_growth_potential
 
     aff = _get_affiliate_or_404(affiliate_id, db)
     aid = str(aff.id)
 
-    churn = churn_one(aid)
-    growth = growth_one(aid)
-
-    c_score = churn["churn_risk_score"]
-    g_score = growth["growth_potential_score"]
+    features = build_feature_vector(aid, db)
+    c_score = predict_churn_risk(aid, features)
+    g_score = predict_growth_potential(aid, features)
     h_score = round(((1 - c_score) * 0.6 + g_score * 0.4) * 100, 1)
 
-    aff.churn_risk_score = c_score
-    aff.growth_potential_score = g_score
+    aff.churn_risk_score = round(c_score, 4)
+    aff.growth_potential_score = round(g_score, 4)
     aff.health_score = h_score
 
     entry = ScoreHistory(
         affiliate_id=aff.id,
-        churn_risk_score=c_score,
-        growth_potential_score=g_score,
+        churn_risk_score=round(c_score, 4),
+        growth_potential_score=round(g_score, 4),
         health_score=h_score,
-        features=churn.get("features", {}),
-        shap_values={},
+        scored_at=datetime.utcnow(),
     )
     db.add(entry)
     db.commit()
@@ -345,6 +328,3 @@ def score_affiliate(
         health_score=h_score,
         scored_at=datetime.utcnow().isoformat(),
     )
-
-
-# Agent routes are handled by src/api/routers/agent.py (prefix /agent)

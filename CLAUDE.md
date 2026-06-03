@@ -652,6 +652,37 @@ These files had stale imports and old schema field names that caused runtime fai
 
 ---
 
+### Frontend
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **Files** | `src/api/templates/index.html`, `src/api/static/` |
+| **Served at** | `http://localhost:8080` |
+
+**Type:** Single-page HTML/CSS/JS, no external frameworks, served by FastAPI with Jinja2.
+
+**Layout:** Two-panel on desktop, stacked on mobile:
+- **Left panel (320px):** App header, 4 stats cards (total affiliates, avg health, at-risk, high-growth) pulled from `GET /ml/dashboard`; affiliate list with health bars (red/amber/green) and status badges, sorted worst-first from `GET /affiliates`
+- **Right panel:** Chat interface with typing indicator, conversation history, per-response tools-used chips, and 4 suggested question chips
+
+**Behaviour:**
+- Page load fetches dashboard stats + affiliate list concurrently
+- Click an affiliate row → pre-fills chat input with a question about that affiliate
+- Click a suggestion chip → pre-fills input
+- Conversation history sent with every message (last 10 turns, `[{role, content}]`)
+- `tools_used` displayed as small chips under each agent response
+- Status dot changes gold while agent is thinking
+
+**Technical notes:**
+- Starlette 1.1.0 requires `templates.TemplateResponse(request=request, name="index.html")` (not the old positional-dict form)
+- `Jinja2` and `aiofiles` added to requirements.txt
+- Main.py `AffiliateOut` updated to new schema (`status`, `revenue_30d`, `days_since_contact` — no `email`/`tier`/`company`)
+- `ScoreHistoryOut` updated (no `shap_values`/`model_version` in new schema)
+- `list_affiliates` filter updated (no `tier`/`niche` filter, use `status` instead)
+
+---
+
 ### Current verified pipeline state
 
 Full end-to-end pipeline tested and working on `develop` branch:

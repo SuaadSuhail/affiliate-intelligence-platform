@@ -54,25 +54,41 @@ def query_database(sql_query: str) -> str:
     scores, health metrics, communication counts, or score history.
     Use this for precise filtered queries on structured data.
     Only SELECT statements are allowed.
-    Example: SELECT name, health_score, churn_risk_score
-    FROM affiliates ORDER BY health_score ASC LIMIT 5"""
+    IMPORTANT: health_score is on a 0-100 scale (not 0-1).
+    Example queries:
+      SELECT name, health_score, churn_risk_score, status
+      FROM affiliates ORDER BY health_score ASC LIMIT 5
+      -- finds lowest health scores (urgent attention needed below 40)
+
+      SELECT name, health_score, churn_risk_score, status
+      FROM affiliates WHERE health_score < 40 ORDER BY health_score ASC
+      -- finds affiliates needing urgent attention"""
     sql = sql_query.strip()
     if not sql.upper().startswith("SELECT"):
         raise ValueError("Only SELECT statements are permitted.")
+
+    print(f"[query_database] Executing SQL: {sql}")
 
     db = _get_db()
     try:
         result = db.execute(text(sql))
         rows = result.fetchmany(20)
+
         if not rows:
+            print("[query_database] → 0 rows returned")
             return "Query returned no rows."
+
         cols = list(result.keys())
         lines = [" | ".join(cols)]
         lines.append("-" * len(lines[0]))
         for row in rows:
             lines.append(" | ".join(str(v) if v is not None else "NULL" for v in row))
-        return "\n".join(lines)
+
+        output = "\n".join(lines)
+        print(f"[query_database] → {len(rows)} rows, columns: {cols}")
+        return output
     except Exception as exc:
+        print(f"[query_database] ERROR: {exc}")
         return f"Database error: {exc}"
     finally:
         db.close()

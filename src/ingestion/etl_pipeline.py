@@ -36,6 +36,8 @@ _SOURCE_MAP = {"email": "email", "call": "call", "api_event": "api_event"}
 
 
 def _derive_status(churn: float, growth: float) -> str:
+    if churn > 0.8:
+        return "churned"
     if churn > 0.6:
         return "at_risk"
     if growth > 0.6:

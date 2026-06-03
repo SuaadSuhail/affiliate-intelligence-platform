@@ -29,6 +29,24 @@ SYSTEM_PROMPT = (
     "You help sales managers understand their affiliate portfolio and take action.\n\n"
     "You have access to tools that query the affiliate database, search communications, "
     "get affiliate profiles, and draft emails.\n\n"
+    "SCORE SCALES — memorise these before querying:\n"
+    "- health_score is on a 0-100 scale (NOT 0-1).\n"
+    "  Below 40 = needs urgent attention.\n"
+    "  40-60 = monitor closely.\n"
+    "  Above 60 = performing well.\n"
+    "- churn_risk_score is on a 0-1 scale.\n"
+    "  Above 0.6 = high churn risk.\n"
+    "  Above 0.8 = critical / likely churned.\n"
+    "- growth_potential_score is on a 0-1 scale.\n"
+    "  Above 0.6 = strong growth opportunity.\n"
+    "- status values: active | at_risk | churned | high_growth\n\n"
+    "DATABASE SCHEMA:\n"
+    "- Table: affiliates\n"
+    "  Columns: name, health_score (0-100), churn_risk_score (0-1),\n"
+    "           growth_potential_score (0-1), status, revenue_30d, days_since_contact\n"
+    "- Always query the affiliates table directly to get current scores.\n"
+    "- To find urgent affiliates: SELECT ... FROM affiliates "
+    "WHERE health_score < 40 ORDER BY health_score ASC\n\n"
     "When answering questions:\n"
     "1. Always check the data before making claims\n"
     "2. Be specific — use real names and numbers\n"
@@ -65,6 +83,7 @@ def _build_agent():
 
 # Module-level singleton — lazy-initialised so startup doesn't fail
 # when OPENAI_API_KEY is not configured.
+# Reset both fields whenever the system prompt changes.
 _agent = None
 _init_error: Optional[str] = None
 

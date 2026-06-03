@@ -56,6 +56,7 @@ from src.api.routers.ingest import router as ingest_router
 from src.api.routers.process import router as process_router
 from src.api.routers.search import router as search_router
 from src.api.routers.ml import router as ml_router
+from src.api.routers.agent import router as agent_router
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,7 @@ app.include_router(ingest_router, prefix="/ingest", tags=["Ingestion"])
 app.include_router(process_router, prefix="/process", tags=["Processing"])
 app.include_router(search_router, tags=["Search"])
 app.include_router(ml_router, prefix="/ml", tags=["ML"])
+app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -345,16 +347,4 @@ def score_affiliate(
     )
 
 
-# ─── Agent chat ───────────────────────────────────────────────────────────────
-
-@app.post("/agent/chat", response_model=ChatResponse, tags=["Agent"])
-def agent_chat(request: ChatRequest) -> ChatResponse:
-    """Send a message to the LangChain ReAct agent."""
-    from src.agent.agent import chat
-
-    try:
-        response = chat(request.message)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
-
-    return ChatResponse(response=response, session_id=request.session_id)
+# Agent routes are handled by src/api/routers/agent.py (prefix /agent)

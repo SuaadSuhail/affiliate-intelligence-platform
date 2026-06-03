@@ -615,6 +615,43 @@ These files had stale imports and old schema field names that caused runtime fai
 
 ---
 
+### LangChain agent
+
+| | |
+|---|---|
+| **Status** | Complete |
+| **Files** | `src/agent/tools.py`, `src/agent/agent.py`, `src/api/routers/agent.py` |
+| **Tests** | `tests/test_agent.py` — 7 tests, all passing |
+
+**LLM:** `gpt-4o-mini`, temperature=0, via `langgraph.prebuilt.create_react_agent`
+(langchain 1.3.x does not ship `create_openai_functions_agent` — use langgraph prebuilt instead)
+
+**Tools (5):**
+
+| Tool | Description |
+|---|---|
+| `query_database` | Raw SQL SELECT against PostgreSQL; validates SELECT-only, max 20 rows |
+| `semantic_search` | ChromaDB embedding search over communications via `vector_store.search_similar()` |
+| `get_affiliate_summary` | Full affiliate profile: scores, recent comms, risk signals, recommended action |
+| `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
+| `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
+
+**API endpoints:** `POST /agent/chat` (with history), `POST /agent/quick` (single-turn), `GET /agent/demo`
+
+**Important implementation notes:**
+- All tools create a fresh `SessionLocal()` per call (not shared) and close it in `finally`
+- `get_affiliate_summary` derives risk signals from communication tags — NOT from SHAP (loading
+  XGBoost via joblib inside a LangGraph tool context causes a segfault in uvicorn)
+- `CHROMA_MODEL_PATH` in `.env` overrides the default path — ensure models are retrained
+  if `.env` changes the path or after switching branches
+- Agent singleton is lazy — `_init_error` is set on first failure and returned on every call
+- Demo endpoint (`GET /agent/demo`) runs 3 questions sequentially; requires models trained first
+
+**Depends on:** All pipeline steps must have run: `/ingest/full` → `/process/nlp` →
+`/process/embeddings` → `/ml/train` → `/ml/score`
+
+---
+
 ### Current verified pipeline state
 
 Full end-to-end pipeline tested and working on `develop` branch:

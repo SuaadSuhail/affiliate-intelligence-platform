@@ -406,7 +406,7 @@
 
   <div class="left-header">
     <h1>Affiliate Intelligence</h1>
-    <p>RevWise Partner Dashboard</p>
+    <p>AI-powered affiliate management</p>
   </div>
 
   <div class="stats-grid" id="statsGrid">
@@ -492,7 +492,24 @@
   document.addEventListener('DOMContentLoaded', loadData);
 
   async function loadData() {
-    await Promise.all([loadDashboard(), loadAffiliates()]);
+    const btn = document.querySelector('.refresh-btn');
+    if (btn) {
+      btn.textContent = '↻ Loading…';
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+    }
+    try {
+      await Promise.all([loadDashboard(), loadAffiliates()]);
+    } finally {
+      if (btn) {
+        btn.textContent = '✓ Updated';
+        btn.style.opacity = '1';
+        setTimeout(() => {
+          btn.textContent = '↻ Refresh';
+          btn.disabled = false;
+        }, 1500);
+      }
+    }
   }
 
   // ── Dashboard stats ────────────────────────────────────────────────

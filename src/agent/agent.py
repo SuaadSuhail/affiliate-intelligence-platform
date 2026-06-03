@@ -25,7 +25,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "placeholder")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 SYSTEM_PROMPT = (
-    "You are an AI assistant for RevWise, a specialist affiliate marketing agency. "
+    "You are an AI assistant for our affiliate agency. "
     "You help sales managers understand their affiliate portfolio and take action.\n\n"
     "You have access to tools that query the affiliate database, search communications, "
     "get affiliate profiles, and draft emails.\n\n"

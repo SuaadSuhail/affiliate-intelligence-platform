@@ -1,94 +1,116 @@
 # Affiliate Intelligence Platform
 
-> **Agentic AI CRM & Sales Communication Optimisation Platform**  
-> Produces a 360° health score for every affiliate — predicting churn risk and growth potential.
+An agentic AI system that produces a **360° health score** for every affiliate partner by combining structured CRM data, NLP analysis of email and call communications, semantic vector search, and XGBoost ML models. A LangChain ReAct agent answers plain-English questions, surfaces at-risk affiliates, and drafts personalised re-engagement emails autonomously — all through a browser-based chat interface.
 
 ---
 
-## Architecture Overview
+## Demo
 
+The agent chains five tools — SQL query, semantic search, affiliate profile, email drafting, and portfolio stats — to answer complex questions in a single response.
+
+**"Which affiliates need urgent attention?"**
 ```
-CSV / Email / Transcript
-        │
-        ▼
-┌─────────────────────┐
-│   ETL Pipeline      │  ← etl_pipeline.py: ingest, clean, route
-│   NLP Processor     │  ← nlp_processor.py: 20 tags + VADER sentiment
-│   Embedding Gen.    │  ← embedding_generator.py: sentence-transformers
-└────────┬────────────┘
-         │
-    ┌────▼─────────────────────┐
-    │  PostgreSQL              │  ← affiliates, communications, score_history
-    │  ChromaDB                │  ← communications_embeddings, affiliate_profiles
-    └────┬─────────────────────┘
-         │
-┌────────▼────────────┐
-│  Feature Engineering│  ← build feature vectors from DB aggregates
-│  Churn Model        │  ← XGBoost → churn_risk_score (0–1)
-│  Growth Model       │  ← XGBoost → growth_potential_score (0–1)
-│  SHAP Explainability│  ← per-affiliate feature attribution
-└────────┬────────────┘
-         │
-┌────────▼────────────┐
-│  LangChain Agent    │  ← ReAct agent with 6 tools
-│  FastAPI REST API   │  ← /affiliates, /agent/chat, /ingest
-└─────────────────────┘
+1. Tom Bauer       — health 14.4  | churn 88% | status: churned | 54 days silent
+2. James O'Brien   — health 27.2  | churn 74% | status: at_risk | 33 days silent
+3. Marcus Williams — health 37.0  | churn 61% | status: at_risk | 24 days silent
+
+Tools used: query_database
 ```
 
-## Health Score Formula
-
+**"What is happening with Tom Bauer?"**
 ```
-health_score = ((1 - churn_risk_score) × 0.6 + growth_potential_score × 0.4) × 100
+Tom Bauer has a health score of 14.4/100 (critical). His churn risk is 88%
+and he is currently marked as churned. He has been silent for 54 days.
+His last communication expressed frustration — tags: escalation, frustrated.
+
+Recommended action: Schedule urgent retention call within 48 hours.
+
+Tools used: get_affiliate_summary
+```
+
+**"Draft a re-engagement email for Tom Bauer."**
+```
+Subject: We want to make this right, Tom
+
+Hi Tom,
+
+I noticed it's been a while since we last spoke, and I wanted to reach out
+personally. I understand there were some frustrations with the platform —
+I'd like to address those directly.
+
+Could we schedule a 20-minute call this week? I'll come prepared with
+specific steps we can take to resolve the issues you raised.
+
+[Your Name] — Partner Success Team
+
+Tools used: get_affiliate_summary, draft_email
 ```
 
 ---
 
-## Quick Start
+## Architecture
 
-### 1. Clone & configure
-
-```bash
-git clone <repo>
-cd affiliate-intelligence-platform
-cp .env.example .env
-# Edit .env — set OPENAI_API_KEY and database credentials
+```
+┌─────────────────────────────────────────────────────────┐
+│  1. Data Sources                                         │
+│     affiliates.csv · emails.txt · transcripts.txt · API  │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  2. Ingestion & Processing                               │
+│     ETL pipeline · spaCy NLP (21 tags) · embeddings     │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  3. Storage                                              │
+│     PostgreSQL (affiliates, communications, scores)      │
+│     ChromaDB  (384-dim communication embeddings)         │
+└────────────────────────┬────────────────────────────────┘
+                         │
+          ┌──────────────┴──────────────┐
+          │                             │
+┌─────────▼──────────┐   ┌─────────────▼──────────────────┐
+│  4. ML Prediction  │   │  5. Agentic AI Core             │
+│  XGBoost churn +   │   │  LangChain ReAct agent          │
+│  growth models     │   │  5 tools · gpt-4o-mini          │
+│  SHAP explanations │   │  conversation history           │
+└─────────┬──────────┘   └─────────────┬──────────────────┘
+          │                             │
+          └──────────────┬──────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│  6. API & Frontend                                       │
+│     FastAPI (21 endpoints) · chat UI · portfolio panel   │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### 2. Start infrastructure
+---
 
-```bash
-docker-compose up -d postgres chromadb
-```
+## Tech Stack
 
-### 3. Install Python dependencies
+| Component | Technology |
+|---|---|
+| Backend API | Python 3.11, FastAPI, Uvicorn |
+| Agent framework | LangChain / LangGraph, OpenAI gpt-4o-mini |
+| ML models | XGBoost, SHAP, scikit-learn |
+| NLP | spaCy (`en_core_web_sm`), custom sentiment lexicon |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
+| Vector store | ChromaDB (cosine similarity) |
+| Database | PostgreSQL, SQLAlchemy ORM |
+| Infrastructure | Docker, Docker Compose |
+| Frontend | Vanilla HTML / CSS / JS (no framework) |
+| Testing | pytest |
 
-```bash
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-```
+---
 
-### 4. Seed mock data
+## Key Features
 
-```bash
-python src/ingestion/etl_pipeline.py
-```
-
-### 5. Train ML models (uses seeded data)
-
-```bash
-python src/ml/churn_model.py
-python src/ml/growth_model.py
-```
-
-### 6. Start API
-
-```bash
-uvicorn src.api.main:app --reload
-# → http://localhost:8000
-# → http://localhost:8000/docs  (Swagger UI)
-```
+- **360° health score** — composite metric combining churn risk (0–1) and growth potential (0–1) into a 0–100 score: `((1 − churn) × 0.6 + growth × 0.4) × 100`
+- **21-tag NLP classification** — each communication is tagged across four groups (engagement, sentiment, intent, relationship) using spaCy NER plus a 40-word custom sentiment lexicon
+- **Semantic search** — ChromaDB embedding search over all email and call transcript content; returns the most semantically relevant communications for any natural-language query
+- **SHAP explainability** — every XGBoost prediction includes top-5 SHAP feature importances identifying the specific drivers of churn risk or growth potential for each affiliate
+- **ReAct agent with 5 tools** — the LangChain agent autonomously decides which tools to call, chains multiple results together, and produces a coherent answer with source attribution
+- **Browser chat interface** — two-panel UI with live portfolio stats, affiliate health bars, conversation history, tools-used attribution, and suggested questions
 
 ---
 
@@ -96,50 +118,92 @@ uvicorn src.api.main:app --reload
 
 ```
 affiliate-intelligence-platform/
-├── CLAUDE.md               ← Single source of truth (read this first)
-├── docker-compose.yml
-├── .env.example
-├── requirements.txt
-├── data/
-│   └── mock/
-│       ├── affiliates.csv
-│       ├── emails.txt
-│       └── transcripts.txt
 ├── src/
-│   ├── ingestion/
-│   │   ├── etl_pipeline.py         ← Orchestrates full ingestion
-│   │   ├── nlp_processor.py        ← 20-tag tagger + sentiment
-│   │   └── embedding_generator.py  ← ChromaDB upsert via sentence-transformers
-│   ├── storage/
-│   │   ├── models.py               ← SQLAlchemy ORM models
-│   │   ├── database.py             ← Session factory + init_db()
-│   │   └── vector_store.py         ← ChromaDB client wrapper
-│   ├── ml/
-│   │   ├── feature_engineering.py  ← Aggregate DB → feature DataFrame
-│   │   ├── churn_model.py          ← Train / predict churn_risk_score
-│   │   ├── growth_model.py         ← Train / predict growth_potential_score
-│   │   └── explainability.py       ← SHAP value computation
 │   ├── agent/
-│   │   ├── tools.py                ← 6 LangChain tools
-│   │   └── agent.py                ← ReAct agent executor
-│   └── api/
-│       └── main.py                 ← FastAPI application
-└── tests/
-    └── test_tagging.py
+│   │   ├── agent.py            ← LangGraph ReAct agent, run_agent()
+│   │   └── tools.py            ← 5 tool definitions (@tool decorated)
+│   ├── api/
+│   │   ├── main.py             ← FastAPI app, router wiring, GET /
+│   │   ├��─ routers/            ← ingest, process, search, ml, agent
+│   │   ├── templates/          ← Jinja2 chat interface (index.html)
+│   │   └── static/             ← CSS and static assets
+│   ├── ingestion/
+│   │   ├── etl_pipeline.py     ← CSV + flat-file data loading
+│   │   ├── nlp_processor.py    ← spaCy tagging + sentiment scoring
+│   │   └── embedding_generator.py ← chunk, encode, store in ChromaDB
+│   ├── ml/
+│   │   ├── feature_engineering.py ← 12-feature vector builder
+│   │   ├── churn_model.py      ← XGBoost churn + rule-based fallback
+│   │   ├── growth_model.py     ← XGBoost growth + rule-based fallback
+│   │   ├── explainability.py   ← SHAP TreeExplainer, top-5 factors
+│   │   └── score_updater.py    ← daily scoring pipeline, score_history
+│   └── storage/
+│       ├── models.py           ← SQLAlchemy ORM models
+│       ├── database.py         ← engine, session factory, get_db()
+│       └── vector_store.py     ← ChromaDB wrapper, add/search
+├── data/mock/                  ← 10 affiliate profiles, 7 communications
+├── tests/                      ← pytest suite (24 tests across 4 files)
+├── models/                     ← XGBoost artefacts (gitignored)
+└── docker-compose.yml          ← PostgreSQL + ChromaDB services
 ```
 
 ---
 
-## NLP Tags
+## Getting Started
 
-The platform detects 20 tags per communication. See [CLAUDE.md](CLAUDE.md) for full
-detection rules. Summary:
+### Prerequisites
 
-`churn_signal` · `growth_intent` · `payment_issue` · `technical_issue` ·
-`satisfaction_high` · `satisfaction_low` · `competitor_mention` · `escalation_risk` ·
-`support_request` · `feature_request` · `pricing_concern` · `fraud_risk` ·
-`high_engagement` · `low_engagement` · `compliance_issue` · `new_opportunity` ·
-`seasonal_pattern` · `relationship_warm` · `urgency` · `question_asked`
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- Python 3.11 with [conda](https://docs.conda.io/)
+- OpenAI API key
+
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/SuaadSuhail/affiliate-intelligence-platform.git
+cd affiliate-intelligence-platform
+
+# 2. Create the Python environment
+conda create -n affiliate-intelligence python=3.11
+conda activate affiliate-intelligence
+pip install -r requirements.txt
+python -m spacy download en_core_web_sm
+
+# 3. Configure environment variables
+cp .env.example .env
+# Open .env and set OPENAI_API_KEY=sk-...
+
+# 4. Start the infrastructure
+docker compose up -d
+# PostgreSQL → :5432  |  ChromaDB → :8001
+
+# 5. Start the API server
+uvicorn src.api.main:app --port 8080 --reload
+```
+
+### Run the Data Pipeline
+
+```bash
+# Load affiliates and communications from mock data files
+curl -X POST http://localhost:8080/ingest/full
+
+# Run NLP tagging on all communications
+curl -X POST http://localhost:8080/process/nlp
+
+# Generate and index communication embeddings
+curl -X POST http://localhost:8080/process/embeddings
+
+# Train churn and growth XGBoost models
+curl -X POST http://localhost:8080/ml/train
+
+# Score all affiliates
+curl -X POST http://localhost:8080/ml/score
+```
+
+### Open the Interface
+
+Navigate to **[http://localhost:8080](http://localhost:8080)**
 
 ---
 
@@ -147,27 +211,39 @@ detection rules. Summary:
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/affiliates` | List all affiliates with current scores |
-| GET | `/affiliates/{id}` | Single affiliate + score history |
-| GET | `/affiliates/{id}/communications` | Paginated comms |
-| POST | `/affiliates/{id}/score` | Trigger re-scoring |
-| POST | `/agent/chat` | `{"message": "..."}` → agent response |
-| POST | `/ingest/csv` | Upload affiliates CSV |
-| GET | `/health` | Service health check |
+| `POST` | `/ingest/full` | Run full ETL from mock data files |
+| `POST` | `/ingest/csv` | Upload affiliates CSV |
+| `POST` | `/process/nlp` | Tag all untagged communications |
+| `POST` | `/process/embeddings` | Generate and store embeddings |
+| `POST` | `/ml/train` | Train churn + growth XGBoost models |
+| `POST` | `/ml/score` | Score all affiliates, persist results |
+| `GET` | `/ml/dashboard` | Portfolio aggregate statistics |
+| `GET` | `/ml/scores` | Affiliate scores sorted worst-first |
+| `GET` | `/ml/explain/{id}` | SHAP feature importances for one affiliate |
+| `GET` | `/affiliates` | List affiliates with filtering and sorting |
+| `GET` | `/search?q=...` | Semantic search over communications |
+| `POST` | `/agent/chat` | Chat with the ReAct agent (with history) |
+| `POST` | `/agent/quick` | Single-turn agent query |
+| `GET` | `/agent/demo` | Run three preset demo questions |
+| `GET` | `/docs` | Interactive Swagger UI |
 
 ---
 
-## Technology Stack
+## Tests
 
-| Layer | Technology |
-|---|---|
-| API | FastAPI + Uvicorn |
-| ORM | SQLAlchemy 2.x |
-| Relational DB | PostgreSQL 16 |
-| Vector DB | ChromaDB |
-| Embeddings | sentence-transformers/all-MiniLM-L6-v2 |
-| NLP | spaCy + VADER Sentiment |
-| ML | XGBoost + scikit-learn |
-| Explainability | SHAP |
-| Agent | LangChain ReAct + GPT-4o |
-| Containerisation | Docker Compose |
+```bash
+pytest tests/ -v
+```
+
+| File | Tests | Coverage |
+|---|---|---|
+| `tests/test_nlp.py` | 6 | Sentiment scoring, tag detection (churn signal, competitor mention, enthusiasm), bulk processing |
+| `tests/test_embeddings.py` | 6 | `chunk_text` splits and overlap, embed pipeline, semantic search endpoint |
+| `tests/test_ml.py` | 5 | Feature vector structure, rule-based scorers, score updater idempotency, SHAP explanation format |
+| `tests/test_agent.py` | 7 | SQL validation (SELECT-only), affiliate summary found/not-found, portfolio stats, semantic search, agent initialisation |
+
+---
+
+## Background
+
+This project was developed as a Knowledge Transfer Partnership demonstrating how agentic AI can augment affiliate relationship management. The system integrates classical machine learning, modern NLP pipelines, and large language model tool use into a single cohesive platform. The architecture is intentionally modular — each layer (ingestion, NLP, ML, agent) can be extended or replaced independently without touching the others.

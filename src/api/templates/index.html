@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Affiliate Intelligence Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #f0f2f5;
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* ── Left panel ─────────────────────────────────────────── */
+    .panel-left {
+      width: 320px;
+      min-width: 280px;
+      background: #1a1d2e;
+      color: #e8eaf0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .left-header {
+      padding: 20px 16px 14px;
+      border-bottom: 1px solid #2d3050;
+    }
+    .left-header h1 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.2px;
+    }
+    .left-header p {
+      font-size: 11px;
+      color: #8b90a8;
+      margin-top: 2px;
+    }
+
+    /* Stats cards */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      padding: 14px 12px 10px;
+    }
+    .stat-card {
+      background: #252840;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .stat-card .stat-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #ffffff;
+      line-height: 1;
+    }
+    .stat-card .stat-label {
+      font-size: 10px;
+      color: #8b90a8;
+      margin-top: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .stat-card.warn .stat-value { color: #f59e0b; }
+    .stat-card.good .stat-value { color: #10b981; }
+
+    /* Affiliate list */
+    .list-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px 6px;
+    }
+    .list-header span {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #8b90a8;
+    }
+    .refresh-btn {
+      background: none;
+      border: 1px solid #3d4265;
+      color: #8b90a8;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .refresh-btn:hover { background: #2d3050; color: #c0c4d8; }
+
+    .affiliate-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 8px 12px;
+    }
+    .affiliate-list::-webkit-scrollbar { width: 4px; }
+    .affiliate-list::-webkit-scrollbar-track { background: transparent; }
+    .affiliate-list::-webkit-scrollbar-thumb { background: #3d4265; border-radius: 2px; }
+
+    .aff-item {
+      background: #252840;
+      border-radius: 7px;
+      padding: 10px 12px;
+      margin-bottom: 5px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .aff-item:hover { background: #2e3358; }
+
+    .aff-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .aff-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: #e8eaf0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 160px;
+    }
+    .status-badge {
+      font-size: 9px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      flex-shrink: 0;
+    }
+    .status-active    { background: #1a3a2a; color: #4ade80; }
+    .status-at_risk   { background: #3a2a10; color: #fb923c; }
+    .status-high_growth { background: #1a2a3a; color: #60a5fa; }
+    .status-churned   { background: #3a1a1a; color: #f87171; }
+
+    .health-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .health-bar {
+      flex: 1;
+      height: 4px;
+      background: #1a1d2e;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .health-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
+    .bar-red    { background: #ef4444; }
+    .bar-amber  { background: #f59e0b; }
+    .bar-green  { background: #10b981; }
+
+    .health-score-text {
+      font-size: 10px;
+      color: #8b90a8;
+      min-width: 28px;
+      text-align: right;
+    }
+
+    .loading-text {
+      color: #8b90a8;
+      font-size: 12px;
+      text-align: center;
+      padding: 16px;
+    }
+
+    /* ── Right panel ─────────────────────────────────────────── */
+    .panel-right {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .chat-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #ffffff;
+    }
+    .chat-header-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .chat-header-text h2 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #111827;
+    }
+    .chat-header-text p {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 1px;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #10b981;
+      margin-left: auto;
+    }
+
+    /* Messages area */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .messages::-webkit-scrollbar { width: 5px; }
+    .messages::-webkit-scrollbar-track { background: #f9fafb; }
+    .messages::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+
+    .msg-wrap {
+      display: flex;
+      flex-direction: column;
+    }
+    .msg-wrap.user { align-items: flex-end; }
+    .msg-wrap.agent { align-items: flex-start; }
+
+    .msg-bubble {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 13.5px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg-wrap.user .msg-bubble {
+      background: #6366f1;
+      color: #ffffff;
+      border-bottom-right-radius: 3px;
+    }
+    .msg-wrap.agent .msg-bubble {
+      background: #f8f9fa;
+      color: #1f2937;
+      border: 1px solid #e5e7eb;
+      border-bottom-left-radius: 3px;
+    }
+
+    .tools-tag {
+      font-size: 10px;
+      color: #9ca3af;
+      margin-top: 4px;
+      padding: 0 4px;
+    }
+    .tool-chip {
+      display: inline-block;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      color: #6b7280;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      margin: 0 2px;
+    }
+
+    /* Typing indicator */
+    .typing-wrap { display: flex; align-items: flex-start; }
+    .typing-bubble {
+      background: #f8f9fa;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      border-bottom-left-radius: 3px;
+      padding: 12px 16px;
+      display: flex;
+      gap: 5px;
+      align-items: center;
+    }
+    .typing-dot {
+      width: 6px; height: 6px;
+      background: #9ca3af;
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-5px); }
+    }
+
+    /* Welcome message */
+    .welcome {
+      text-align: center;
+      padding: 40px 20px;
+      color: #6b7280;
+    }
+    .welcome h3 { font-size: 17px; color: #374151; margin-bottom: 8px; }
+    .welcome p { font-size: 13px; line-height: 1.5; }
+
+    /* Suggestions */
+    .suggestions {
+      padding: 10px 20px 6px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      border-top: 1px solid #f3f4f6;
+    }
+    .suggestion-chip {
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      color: #374151;
+      padding: 5px 12px;
+      border-radius: 16px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .suggestion-chip:hover {
+      background: #e8eaf0;
+      border-color: #6366f1;
+      color: #6366f1;
+    }
+
+    /* Input area */
+    .input-area {
+      padding: 12px 16px 16px;
+      display: flex;
+      gap: 8px;
+      border-top: 1px solid #e5e7eb;
+      background: #ffffff;
+    }
+    .msg-input {
+      flex: 1;
+      padding: 10px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 22px;
+      font-size: 13.5px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s;
+      resize: none;
+      min-height: 42px;
+      max-height: 120px;
+      line-height: 1.4;
+    }
+    .msg-input:focus { border-color: #6366f1; }
+    .send-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: #6366f1;
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s, transform 0.1s;
+      font-size: 16px;
+    }
+    .send-btn:hover { background: #4f46e5; }
+    .send-btn:active { transform: scale(0.94); }
+    .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+
+    /* ── Responsive ──────────────────────────────────────────── */
+    @media (max-width: 700px) {
+      body { flex-direction: column; }
+      .panel-left {
+        width: 100%;
+        min-width: unset;
+        height: auto;
+        max-height: 40vh;
+      }
+      .stats-grid { grid-template-columns: repeat(4, 1fr); padding: 10px 8px 6px; }
+      .affiliate-list { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Left Panel ──────────────────────────────────────────────────── -->
+<aside class="panel-left">
+
+  <div class="left-header">
+    <h1>Affiliate Intelligence</h1>
+    <p>AI-powered affiliate management</p>
+  </div>
+
+  <div class="stats-grid" id="statsGrid">
+    <div class="stat-card">
+      <div class="stat-value" id="statTotal">—</div>
+      <div class="stat-label">Affiliates</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="statHealth">—</div>
+      <div class="stat-label">Avg Health</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-value" id="statAtRisk">—</div>
+      <div class="stat-label">At Risk</div>
+    </div>
+    <div class="stat-card good">
+      <div class="stat-value" id="statGrowth">—</div>
+      <div class="stat-label">High Growth</div>
+    </div>
+  </div>
+
+  <div class="list-header">
+    <span>Affiliates</span>
+    <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
+  </div>
+
+  <div class="affiliate-list" id="affiliateList">
+    <div class="loading-text">Loading…</div>
+  </div>
+
+</aside>
+
+<!-- ── Right Panel ─────────────────────────────────────────────────── -->
+<main class="panel-right">
+
+  <div class="chat-header">
+    <div class="chat-header-icon">✦</div>
+    <div class="chat-header-text">
+      <h2>AI Sales Assistant</h2>
+      <p>Powered by GPT-4o-mini · LangGraph</p>
+    </div>
+    <div class="status-dot" id="statusDot" title="Agent ready"></div>
+  </div>
+
+  <div class="messages" id="messages">
+    <div class="welcome">
+      <h3>Welcome to Affiliate Intelligence</h3>
+      <p>Ask me anything about your affiliate portfolio.<br>
+         I can analyse risk, surface growth opportunities,<br>
+         and draft personalised outreach emails.</p>
+    </div>
+  </div>
+
+  <div class="suggestions" id="suggestions">
+    <span class="suggestion-chip" onclick="useSuggestion(this)">Which affiliates need urgent attention?</span>
+    <span class="suggestion-chip" onclick="useSuggestion(this)">What is happening with Tom Bauer?</span>
+    <span class="suggestion-chip" onclick="useSuggestion(this)">Give me a portfolio health summary</span>
+    <span class="suggestion-chip" onclick="useSuggestion(this)">Draft an email for the most at-risk affiliate</span>
+  </div>
+
+  <div class="input-area">
+    <textarea
+      id="msgInput"
+      class="msg-input"
+      placeholder="Ask about your affiliate portfolio…"
+      rows="1"
+      onkeydown="handleKey(event)"
+      oninput="autoResize(this)"
+    ></textarea>
+    <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send">
+      &#9658;
+    </button>
+  </div>
+
+</main>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────
+  let conversationHistory = [];
+  let isThinking = false;
+
+  // ── On load ────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', loadData);
+
+  async function loadData() {
+    const btn = document.querySelector('.refresh-btn');
+    if (btn) {
+      btn.textContent = '↻ Loading…';
+      btn.disabled = true;
+      btn.style.opacity = '0.7';
+    }
+    try {
+      await Promise.all([loadDashboard(), loadAffiliates()]);
+    } finally {
+      if (btn) {
+        btn.textContent = '✓ Updated';
+        btn.style.opacity = '1';
+        setTimeout(() => {
+          btn.textContent = '↻ Refresh';
+          btn.disabled = false;
+        }, 1500);
+      }
+    }
+  }
+
+  // ── Dashboard stats ────────────────────────────────────────────────
+  async function loadDashboard() {
+    try {
+      const res = await fetch('/ml/dashboard');
+      if (!res.ok) return;
+      const d = await res.json();
+      document.getElementById('statTotal').textContent   = d.total_affiliates ?? '—';
+      document.getElementById('statHealth').textContent  = d.avg_health_score != null
+        ? d.avg_health_score.toFixed(1) : '—';
+      document.getElementById('statAtRisk').textContent  = d.at_risk_count ?? '—';
+      document.getElementById('statGrowth').textContent  = d.high_growth_count ?? '—';
+    } catch (e) {
+      console.warn('Dashboard fetch failed:', e);
+    }
+  }
+
+  // ── Affiliate list ─────────────────────────────────────────────────
+  async function loadAffiliates() {
+    const el = document.getElementById('affiliateList');
+    try {
+      const res = await fetch('/affiliates?sort_by=health_score&order=asc&limit=15');
+      if (!res.ok) { el.innerHTML = '<div class="loading-text">Could not load affiliates.</div>'; return; }
+      const affiliates = await res.json();
+      if (!affiliates.length) { el.innerHTML = '<div class="loading-text">No affiliates found.</div>'; return; }
+
+      el.innerHTML = affiliates.map(a => {
+        const h = a.health_score;
+        const barClass = h < 40 ? 'bar-red' : h < 60 ? 'bar-amber' : 'bar-green';
+        const badgeClass = 'status-' + (a.status || 'active').replace(' ', '_');
+        const statusLabel = (a.status || 'active').replace('_', ' ');
+        return `
+          <div class="aff-item" onclick="askAbout('${a.name}')">
+            <div class="aff-top">
+              <span class="aff-name">${a.name}</span>
+              <span class="status-badge ${badgeClass}">${statusLabel}</span>
+            </div>
+            <div class="health-bar-wrap">
+              <div class="health-bar">
+                <div class="health-bar-fill ${barClass}" style="width:${h}%"></div>
+              </div>
+              <span class="health-score-text">${h.toFixed(1)}</span>
+            </div>
+          </div>`;
+      }).join('');
+    } catch (e) {
+      el.innerHTML = '<div class="loading-text">Error loading affiliates.</div>';
+    }
+  }
+
+  // ── Click affiliate → pre-fill question ───────────────────────────
+  function askAbout(name) {
+    document.getElementById('msgInput').value = `What is happening with ${name} and what should I do?`;
+    autoResize(document.getElementById('msgInput'));
+    document.getElementById('msgInput').focus();
+  }
+
+  // ── Suggestion chips ───────────────────────────────────────────────
+  function useSuggestion(el) {
+    const text = el.textContent;
+    document.getElementById('msgInput').value = text;
+    autoResize(document.getElementById('msgInput'));
+    document.getElementById('msgInput').focus();
+    // Dim the chip
+    el.style.opacity = '0.4';
+    el.style.pointerEvents = 'none';
+  }
+
+  // ── Enter key ─────────────────────────────────────────────────────
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  }
+
+  // ── Auto-resize textarea ───────────────────────────────────────────
+  function autoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  }
+
+  // ── Send message ───────────────────────────────────────────────────
+  async function sendMessage() {
+    const input = document.getElementById('msgInput');
+    const text = input.value.trim();
+    if (!text || isThinking) return;
+
+    input.value = '';
+    autoResize(input);
+    setThinking(true);
+
+    appendMessage('user', text);
+    const typingId = appendTyping();
+
+    try {
+      const res = await fetch('/agent/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          conversation_history: conversationHistory,
+        }),
+      });
+
+      removeTyping(typingId);
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({detail: 'Request failed'}));
+        appendMessage('agent', '⚠️ ' + (err.detail || 'Something went wrong.'), []);
+        setThinking(false);
+        return;
+      }
+
+      const data = await res.json();
+      const agentText = data.response || 'No response.';
+      const tools = data.tools_used || [];
+
+      appendMessage('agent', agentText, tools);
+
+      conversationHistory.push({ role: 'human', content: text });
+      conversationHistory.push({ role: 'ai',    content: agentText });
+
+      // Keep last 10 turns to avoid huge payloads
+      if (conversationHistory.length > 20) {
+        conversationHistory = conversationHistory.slice(-20);
+      }
+
+    } catch (e) {
+      removeTyping(typingId);
+      appendMessage('agent', '⚠️ Network error. Is the server running?', []);
+    }
+
+    setThinking(false);
+    scrollToBottom();
+  }
+
+  // ── Render helpers ─────────────────────────────────────────────────
+  function appendMessage(role, text, tools) {
+    const msgs = document.getElementById('messages');
+
+    // Remove welcome panel on first real message
+    const welcome = msgs.querySelector('.welcome');
+    if (welcome) welcome.remove();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-wrap ' + role;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = text;  // textContent prevents XSS
+    wrap.appendChild(bubble);
+
+    if (role === 'agent' && tools && tools.length) {
+      const tag = document.createElement('div');
+      tag.className = 'tools-tag';
+      tag.innerHTML = 'Tools: ' + tools.map(t =>
+        `<span class="tool-chip">${t}</span>`
+      ).join('');
+      wrap.appendChild(tag);
+    }
+
+    msgs.appendChild(wrap);
+    scrollToBottom();
+    return wrap;
+  }
+
+  function appendTyping() {
+    const msgs = document.getElementById('messages');
+    const id = 'typing-' + Date.now();
+    msgs.insertAdjacentHTML('beforeend', `
+      <div id="${id}" class="typing-wrap">
+        <div class="typing-bubble">
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+        </div>
+      </div>`);
+    scrollToBottom();
+    return id;
+  }
+
+  function removeTyping(id) {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
+
+  function scrollToBottom() {
+    const msgs = document.getElementById('messages');
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function setThinking(val) {
+    isThinking = val;
+    const btn = document.getElementById('sendBtn');
+    const dot = document.getElementById('statusDot');
+    btn.disabled = val;
+    dot.style.background = val ? '#f59e0b' : '#10b981';
+    dot.title = val ? 'Agent thinking…' : 'Agent ready';
+  }
+</script>
+
+</body>
+</html>

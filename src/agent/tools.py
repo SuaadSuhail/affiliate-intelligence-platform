@@ -1,164 +1,139 @@
 """
 LangChain Tool Definitions
 ==========================
-Six tools exposed to the ReAct agent:
+Five tools for the ReAct agent. Each docstring is used by LangChain
+to decide when to call the tool — keep them descriptive.
 
-  1. query_affiliates     — SQL query affiliate + score data
-  2. search_communications — semantic search over ChromaDB
-  3. summarise_affiliate   — narrative health summary
-  4. draft_email           — personalised outreach draft
-  5. flag_risk             — create urgent risk flag in DB
-  6. run_scoring           — trigger re-scoring pipeline
+Tools
+-----
+1. query_database        — raw SQL SELECT against PostgreSQL
+2. semantic_search       — ChromaDB embedding search over communications
+3. get_affiliate_summary — full profile for one affiliate
+4. draft_email           — LLM-generated personalised email draft
+5. get_portfolio_health  — whole-portfolio aggregate stats
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from langchain.tools import tool
-from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from src.storage.database import db_session
+from src.storage.database import SessionLocal
 from src.storage.models import Affiliate, Communication, ScoreHistory
-from src.ingestion.embedding_generator import get_generator
-from src.ml.explainability import top_risk_drivers
+from src.storage.vector_store import vector_store
+
+def _get_db():
+    """Return a fresh SessionLocal for each tool call."""
+    return SessionLocal()
 
 
-# ─── Tool 1: Query affiliates ─────────────────────────────────────────────────
-
-@tool
-def query_affiliates(query: str) -> str:
-    """
-    Query the affiliate database. Accepts natural-language queries such as:
-      - "list all gold tier affiliates"
-      - "affiliates with churn_risk_score > 0.6"
-      - "top 5 affiliates by monthly revenue"
-      - "affiliates in finance niche"
-
-    Returns a JSON string with matching affiliate summaries.
-    """
-    lower = query.lower()
-    with db_session() as db:
-        q = db.query(Affiliate)
-
-        # Simple natural-language filter parsing
-        if "churn" in lower and any(op in lower for op in [">", "above", "high"]):
-            q = q.filter(Affiliate.churn_risk_score > 0.5).order_by(
-                Affiliate.churn_risk_score.desc()
-            )
-        elif "growth" in lower and any(op in lower for op in [">", "above", "high"]):
-            q = q.filter(Affiliate.growth_potential_score > 0.5).order_by(
-                Affiliate.growth_potential_score.desc()
-            )
-        elif "platinum" in lower:
-            q = q.filter(Affiliate.tier == "platinum")
-        elif "gold" in lower:
-            q = q.filter(Affiliate.tier == "gold")
-        elif "silver" in lower:
-            q = q.filter(Affiliate.tier == "silver")
-        elif "bronze" in lower:
-            q = q.filter(Affiliate.tier == "bronze")
-        elif "revenue" in lower:
-            q = q.order_by(Affiliate.monthly_revenue.desc())
-        elif "health" in lower:
-            q = q.order_by(Affiliate.health_score.desc())
-
-        # Niche filter
-        for niche in ["finance", "travel", "gaming", "saas", "e-commerce",
-                       "health", "wellness", "education", "lifestyle"]:
-            if niche in lower:
-                q = q.filter(Affiliate.niche.ilike(f"%{niche}%"))
-                break
-
-        # Limit
-        limit = 10
-        for word, n in [("top 5", 5), ("top 3", 3), ("top 10", 10), ("all", 100)]:
-            if word in lower:
-                limit = n
-                break
-        affiliates = q.limit(limit).all()
-
-        result = [
-            {
-                "id": str(a.id),
-                "name": a.name,
-                "email": a.email,
-                "company": a.company,
-                "tier": a.tier,
-                "niche": a.niche,
-                "monthly_revenue": a.monthly_revenue,
-                "churn_risk_score": a.churn_risk_score,
-                "growth_potential_score": a.growth_potential_score,
-                "health_score": a.health_score,
-                "last_contact_date": a.last_contact_date.isoformat() if a.last_contact_date else None,
-            }
-            for a in affiliates
-        ]
-    return json.dumps(result, indent=2)
+# Lazy LLM for draft_email (avoids import error when key not set)
+_llm = None
 
 
-# ─── Tool 2: Search communications ───────────────────────────────────────────
+def _get_llm():
+    global _llm
+    if _llm is None:
+        api_key = os.getenv("OPENAI_API_KEY", "placeholder")
+        if not api_key or api_key == "placeholder":
+            return None
+        from langchain_openai import ChatOpenAI
+        _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    return _llm
+
+
+# ─── Tool 1: query_database ───────────────────────────────────────────────────
 
 @tool
-def search_communications(query: str) -> str:
-    """
-    Semantic search over all affiliate communications stored in ChromaDB.
-    Accepts natural-language queries such as:
-      - "affiliates complaining about payments"
-      - "emails mentioning Black Friday campaigns"
-      - "calls where affiliate threatened to leave"
+def query_database(sql_query: str) -> str:
+    """Query the PostgreSQL database with a SELECT statement to get affiliate
+    scores, health metrics, communication counts, or score history.
+    Use this for precise filtered queries on structured data.
+    Only SELECT statements are allowed.
+    Example: SELECT name, health_score, churn_risk_score
+    FROM affiliates ORDER BY health_score ASC LIMIT 5"""
+    sql = sql_query.strip()
+    if not sql.upper().startswith("SELECT"):
+        raise ValueError("Only SELECT statements are permitted.")
 
-    Returns top-5 matching communication excerpts with metadata.
-    """
-    gen = get_generator()
-    results = gen.search_communications(query=query, n_results=5)
+    db = _get_db()
+    try:
+        result = db.execute(text(sql))
+        rows = result.fetchmany(20)
+        if not rows:
+            return "Query returned no rows."
+        cols = list(result.keys())
+        lines = [" | ".join(cols)]
+        lines.append("-" * len(lines[0]))
+        for row in rows:
+            lines.append(" | ".join(str(v) if v is not None else "NULL" for v in row))
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Database error: {exc}"
+    finally:
+        db.close()
+
+
+# ─── Tool 2: semantic_search ──────────────────────────────────────────────────
+
+@tool
+def semantic_search(query: str) -> str:
+    """Search through affiliate emails and call transcripts by meaning.
+    Use this to find relevant communications without needing exact keywords.
+    Input should be a natural language description of what you are looking for.
+    Example: 'affiliate expressing frustration about platform performance'"""
+    try:
+        from src.ingestion.embedding_generator import model as embed_model
+        embedding = embed_model.encode(query).tolist()
+    except Exception as exc:
+        return f"Embedding error: {exc}"
+
+    try:
+        results = vector_store.search_similar(embedding, n_results=5)
+    except Exception as exc:
+        return f"Search error: {exc}"
+
     if not results:
         return "No matching communications found."
 
-    output = []
-    for r in results:
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
         meta = r.get("metadata", {})
-        snippet = r.get("document", "")[:300]
-        output.append(
-            f"[{meta.get('channel', '?').upper()} | {meta.get('direction', '?')} | "
-            f"affiliate={meta.get('affiliate_id', '?')} | "
-            f"sentiment={meta.get('sentiment_label', '?')} | "
-            f"tags={meta.get('tags', '')}]\n"
-            f"{snippet}…\n"
+        text_snippet = r.get("text", r.get("document", ""))[:300]
+        score = round(1 - r.get("distance", 1.0), 3)
+        tags_str = meta.get("tags", "").strip("|").replace("|", ", ")
+        lines.append(
+            f"[{i}] Affiliate: {meta.get('affiliate_name', meta.get('affiliate_id', '?'))} "
+            f"| Source: {meta.get('source', '?')} "
+            f"| Similarity: {score:.3f}\n"
+            f"    Tags: {tags_str or 'none'}\n"
+            f"    \"{text_snippet}…\""
         )
-    return "\n---\n".join(output)
+    return "\n\n".join(lines)
 
 
-# ─── Tool 3: Summarise affiliate ──────────────────────────────────────────────
+# ─── Tool 3: get_affiliate_summary ────────────────────────────────────────────
 
 @tool
-def summarise_affiliate(affiliate_id: str) -> str:
-    """
-    Generate a structured narrative health summary for a single affiliate.
-    Input: affiliate UUID string or email address.
-
-    Returns a human-readable summary including:
-    - Profile overview
-    - Current health scores
-    - Recent communication sentiment
-    - Top risk / growth drivers (SHAP-based)
-    - Recommended next action
-    """
-    with db_session() as db:
-        # Accept UUID or email
-        if "@" in affiliate_id:
-            aff = db.query(Affiliate).filter_by(email=affiliate_id).first()
-        else:
-            aff = db.query(Affiliate).filter(
-                Affiliate.id == affiliate_id
-            ).first()
-
+def get_affiliate_summary(affiliate_name: str) -> str:
+    """Get a complete profile for one affiliate including their health score,
+    churn risk, growth potential, SHAP explanation of risk factors, recent
+    communication tags, and days since last contact.
+    Use this when you need a full picture of one specific affiliate."""
+    db = _get_db()
+    try:
+        aff = (
+            db.query(Affiliate)
+            .filter(Affiliate.name.ilike(f"%{affiliate_name.strip()}%"))
+            .first()
+        )
         if not aff:
-            return f"Affiliate not found: {affiliate_id}"
+            return f"Affiliate not found: '{affiliate_name}'. Check the name and try again."
 
-        # Recent communications
         recent_comms = (
             db.query(Communication)
             .filter(Communication.affiliate_id == aff.id)
@@ -167,320 +142,199 @@ def summarise_affiliate(affiliate_id: str) -> str:
             .all()
         )
 
-        # Latest score history
-        latest_score = (
-            db.query(ScoreHistory)
-            .filter(ScoreHistory.affiliate_id == aff.id)
-            .order_by(ScoreHistory.scored_at.desc())
-            .first()
-        )
-
-        comm_summary = []
+        comm_lines: list[str] = []
         for c in recent_comms:
             tags_str = ", ".join(c.tags) if c.tags else "none"
-            comm_summary.append(
-                f"  • [{c.channel.upper()}] {c.occurred_at.strftime('%Y-%m-%d') if c.occurred_at else '?'} "
-                f"— sentiment: {c.sentiment_label} | tags: {tags_str}"
+            date_str = c.occurred_at.strftime("%Y-%m-%d") if c.occurred_at else "?"
+            snippet = (c.raw_text or "")[:120].replace("\n", " ")
+            comm_lines.append(
+                f"  • [{c.source.upper()}] {date_str} | tags: {tags_str}\n"
+                f"    \"{snippet}…\""
             )
 
-    # SHAP drivers
-    try:
-        churn_drivers = top_risk_drivers(str(aff.id), model_type="churn")[:3]
-        growth_drivers = top_risk_drivers(str(aff.id), model_type="growth")[:3]
-    except Exception:
-        churn_drivers = []
-        growth_drivers = []
+        # Key risk signals from recent communications (derived from tags)
+        churn_factors: list[str] = []
+        growth_factors: list[str] = []
+        for c in recent_comms:
+            for tag in (c.tags or []):
+                if tag in ("churn_signal", "competitor_mention", "escalation", "frustrated", "gone_silent"):
+                    if tag not in churn_factors:
+                        churn_factors.append(tag)
+                if tag in ("expansion_interest", "upsell_signal", "enthusiastic", "positive_sentiment", "new_campaign_intent"):
+                    if tag not in growth_factors:
+                        growth_factors.append(tag)
 
-    # Recommended action
-    if aff.churn_risk_score >= 0.65:
-        action = "⚠️  URGENT: Schedule retention call within 48 hours."
-    elif aff.growth_potential_score >= 0.70:
-        action = "🚀  Growth opportunity: Propose scale-up plan and commission uplift."
-    elif aff.churn_risk_score >= 0.45:
-        action = "📞  Monitor closely: Follow up within 7 days to check satisfaction."
-    else:
-        action = "✅  Healthy affiliate: Maintain regular check-in cadence."
+        c_risk = aff.churn_risk_score or 0.5
+        g_pot = aff.growth_potential_score or 0.5
+        if c_risk >= 0.65:
+            action = "⚠️  URGENT: Schedule retention call within 48 hours."
+        elif g_pot >= 0.70:
+            action = "🚀  Growth opportunity: Propose scale-up plan."
+        elif c_risk >= 0.45:
+            action = "📞  Monitor: Follow up within 7 days."
+        else:
+            action = "✅  Healthy: Maintain regular check-in cadence."
 
-    lines = [
-        f"═══ AFFILIATE HEALTH SUMMARY ═══",
-        f"Name:     {aff.name}",
-        f"Company:  {aff.company or 'N/A'}",
-        f"Email:    {aff.email}",
-        f"Tier:     {aff.tier.upper()}  |  Niche: {aff.niche or 'N/A'}  |  Country: {aff.country or 'N/A'}",
-        f"Revenue:  ${aff.monthly_revenue:,.2f}/month",
-        f"",
-        f"─── Scores ───────────────────",
-        f"Health Score:          {aff.health_score:.1f}/100",
-        f"Churn Risk:            {aff.churn_risk_score:.2%}",
-        f"Growth Potential:      {aff.growth_potential_score:.2%}",
-        f"Last Contact:          {aff.last_contact_date.strftime('%Y-%m-%d') if aff.last_contact_date else 'Never'}",
-        f"",
-        f"─── Recent Communications ────",
-    ] + (comm_summary or ["  No communications on record."]) + [
-        f"",
-        f"─── Risk Drivers (Churn) ─────",
-        f"  {', '.join(churn_drivers) if churn_drivers else 'Insufficient data'}",
-        f"",
-        f"─── Growth Drivers ───────────",
-        f"  {', '.join(growth_drivers) if growth_drivers else 'Insufficient data'}",
-        f"",
-        f"─── Recommended Action ───────",
-        f"  {action}",
-    ]
-    return "\n".join(lines)
+        lines = [
+            "═══ AFFILIATE HEALTH SUMMARY ═══",
+            f"Name:             {aff.name}",
+            f"Status:           {aff.status}",
+            f"Revenue (30d):    ${float(aff.revenue_30d or 0):,.2f}",
+            f"Days silent:      {aff.days_since_contact or 0}",
+            "",
+            "─── Scores ──────────────────────",
+            f"Health Score:      {aff.health_score:.1f} / 100",
+            f"Churn Risk:        {c_risk:.1%}",
+            f"Growth Potential:  {g_pot:.1%}",
+            "",
+            "─── Recent Communications ───────",
+        ]
+        lines += (comm_lines or ["  No communications on record."])
+        lines += [
+            "",
+            "─── Churn Risk Drivers ──────────",
+            f"  {', '.join(churn_factors) if churn_factors else 'Insufficient data'}",
+            "",
+            "─── Growth Drivers ──────────────",
+            f"  {', '.join(growth_factors) if growth_factors else 'Insufficient data'}",
+            "",
+            "─── Recommended Action ──────────",
+            f"  {action}",
+        ]
+        return "\n".join(lines)
+    finally:
+        db.close()
 
 
-# ─── Tool 4: Draft email ──────────────────────────────────────────────────────
+# ─── Tool 4: draft_email ──────────────────────────────────────────────────────
 
 @tool
-def draft_email(input_json: str) -> str:
-    """
-    Draft a personalised outreach email for an affiliate.
+def draft_email(input_str: str) -> str:
+    """Draft a personalised re-engagement or follow-up email for an affiliate.
+    Input should be a string containing: affiliate name, their current situation
+    (scores, recent behaviour), and the desired tone (urgent, warm, neutral).
+    Use this as the final step after understanding an affiliate's situation.
+    Example input: 'affiliate_name: Tom Bauer, situation: 51 days silent,
+    competitor mentioned, CTR declining -4.2%, tone: urgent but warm'"""
+    # Parse input string
+    affiliate_name = ""
+    situation = ""
+    tone = "warm"
 
-    Input must be a JSON string with keys:
-      - affiliate_id : UUID or email of the affiliate
-      - goal         : one of "retention", "growth", "check_in", "payment_follow_up",
-                       "feature_announcement", "bfcm_campaign"
+    for part in input_str.split(","):
+        part = part.strip()
+        if part.lower().startswith("affiliate_name:"):
+            affiliate_name = part.split(":", 1)[1].strip()
+        elif part.lower().startswith("situation:"):
+            situation = part.split(":", 1)[1].strip()
+        elif part.lower().startswith("tone:"):
+            tone = part.split(":", 1)[1].strip()
 
-    Returns a ready-to-send email draft (Subject + Body).
-    """
-    try:
-        params = json.loads(input_json)
-    except json.JSONDecodeError:
-        return "Error: input must be valid JSON with keys affiliate_id and goal."
+    if not affiliate_name:
+        affiliate_name = input_str[:50]
 
-    affiliate_id = params.get("affiliate_id", "")
-    goal = params.get("goal", "check_in")
+    # Try LLM-generated email
+    llm = _get_llm()
+    if llm:
+        try:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            prompt_text = (
+                f"Write a professional affiliate marketing re-engagement email.\n\n"
+                f"Affiliate: {affiliate_name}\n"
+                f"Situation: {situation}\n"
+                f"Tone: {tone}\n\n"
+                f"Requirements:\n"
+                f"- Under 150 words\n"
+                f"- Start with Subject: on the first line\n"
+                f"- Then Body: on the next line\n"
+                f"- Sound human and specific to the situation\n"
+                f"- Include one concrete next step"
+            )
+            response = llm.invoke([HumanMessage(content=prompt_text)])
+            email_text = response.content
+            if "Subject:" not in email_text:
+                email_text = f"Subject: Following up — {affiliate_name}\n\nBody:\n{email_text}"
+            return f"=== EMAIL DRAFT ===\n\n{email_text}"
+        except Exception as exc:
+            pass  # fall through to template
 
-    with db_session() as db:
-        if "@" in affiliate_id:
-            aff = db.query(Affiliate).filter_by(email=affiliate_id).first()
-        else:
-            aff = db.query(Affiliate).filter(Affiliate.id == affiliate_id).first()
-        if not aff:
-            return f"Affiliate not found: {affiliate_id}"
-        name = aff.name.split()[0]  # first name
-        company = aff.company or "your company"
-        tier = aff.tier
-        revenue = aff.monthly_revenue
-        niche = aff.niche or "your niche"
-
-    templates = {
-        "retention": f"""Subject: We value your partnership — let's talk
-
-Hi {name},
-
-I wanted to reach out personally because we noticed some recent activity on your account that made me want to check in directly.
-
-You've been a valued {tier.upper()} partner since joining us, and the work you do in the {niche} space — currently driving ${revenue:,.0f}/month — is genuinely impressive. I'd hate to think there's anything we could be doing better that we haven't addressed.
-
-Would you be open to a 20-minute call this week? I'd love to hear what's on your mind and see how we can better support {company}'s goals.
-
-Looking forward to hearing from you.
-
-Warm regards,
-[Your Name]
-Partner Success Team""",
-
-        "growth": f"""Subject: Let's unlock your next revenue milestone
-
-Hi {name},
-
-Your recent performance in the {niche} space has been outstanding — and I think there's a real opportunity for us to grow together even further.
-
-Based on what we're seeing from your campaigns, I believe we could get {company} from ${revenue:,.0f}/month to significantly higher with a few targeted optimisations. I'd like to explore:
-
-• Co-branded landing pages tailored to your top traffic sources
-• An enhanced commission structure for new campaign launches
-• Early access to our upcoming seasonal promotions toolkit
-
-Can we set up a quick 30-minute strategy call? I'll come prepared with specific data and ideas.
-
-Excited about what we can build together!
-
-Best,
-[Your Name]
-Partner Growth Team""",
-
-        "check_in": f"""Subject: Quick check-in — how are things going?
-
-Hi {name},
-
-Just wanted to touch base and see how things are going on your end.
-
-It's been a little while since we last spoke, and I always like to make sure our {tier.upper()} partners have everything they need to succeed.
-
-Is there anything on your radar — upcoming campaigns, technical questions, or ideas you'd like to explore? I'm here to help.
-
-Hope all is well at {company}!
-
-Cheers,
-[Your Name]
-Partner Success Team""",
-
-        "payment_follow_up": f"""Subject: Payment update for your account
-
-Hi {name},
-
-I'm following up regarding your recent payment query. I want to make sure this is resolved as quickly as possible for you.
-
-I've escalated your case to our Finance team and you should receive an update within 1 business day. If you have a specific invoice reference or date range in question, please reply with those details and I'll fast-track it.
-
-Apologies for any inconvenience — we take payment accuracy very seriously.
-
-Kind regards,
-[Your Name]
-Partner Support Team""",
-
-        "bfcm_campaign": f"""Subject: 🛍️ Your exclusive BFCM toolkit is ready
-
-Hi {name},
-
-Black Friday / Cyber Monday is just around the corner — and we've built something special for our {tier.upper()} partners.
-
-As one of our top performers in the {niche} space, you get early access to:
-
-✅ Co-branded BFCM landing pages (3 designs included)
-✅ Boosted commission rate: 30% on all BFCM conversions
-✅ Dedicated tracking dashboard for the holiday season
-✅ Priority support throughout November & December
-
-Last year our top affiliates saw 3x their normal monthly revenue during BFCM. With ${revenue:,.0f}/month as your baseline, the potential here is huge.
-
-Want to lock this in? Just reply to this email and I'll get everything set up for {company} within 24 hours.
-
-Let's make this your best Q4 yet!
-
-[Your Name]
-Partner Growth Team""",
-    }
-
-    draft = templates.get(goal, templates["check_in"])
-    return f"=== EMAIL DRAFT ({goal.upper()}) ===\n\n{draft}"
-
-
-# ─── Tool 5: Flag risk ────────────────────────────────────────────────────────
-
-@tool
-def flag_risk(input_json: str) -> str:
-    """
-    Create an urgent risk flag for an affiliate by updating their churn_risk_score
-    and logging a note in the score_history.
-
-    Input must be a JSON string with keys:
-      - affiliate_id : UUID or email
-      - reason       : short description of the risk (stored in features.flag_reason)
-      - urgency      : "low" | "medium" | "high" (default: "high")
-
-    Returns confirmation string.
-    """
-    try:
-        params = json.loads(input_json)
-    except json.JSONDecodeError:
-        return "Error: input must be valid JSON."
-
-    affiliate_id = params.get("affiliate_id", "")
-    reason = params.get("reason", "Manual risk flag")
-    urgency = params.get("urgency", "high")
-
-    urgency_boost = {"low": 0.1, "medium": 0.2, "high": 0.35}.get(urgency, 0.35)
-
-    with db_session() as db:
-        if "@" in affiliate_id:
-            aff = db.query(Affiliate).filter_by(email=affiliate_id).first()
-        else:
-            aff = db.query(Affiliate).filter(Affiliate.id == affiliate_id).first()
-
-        if not aff:
-            return f"Affiliate not found: {affiliate_id}"
-
-        # Boost churn risk score
-        old_score = aff.churn_risk_score
-        new_score = min(1.0, old_score + urgency_boost)
-        aff.churn_risk_score = round(new_score, 4)
-        aff.health_score = round(
-            ((1 - aff.churn_risk_score) * 0.6 + aff.growth_potential_score * 0.4) * 100, 1
-        )
-
-        # Log in score_history
-        entry = ScoreHistory(
-            affiliate_id=aff.id,
-            churn_risk_score=new_score,
-            growth_potential_score=aff.growth_potential_score,
-            health_score=aff.health_score,
-            features={"flag_reason": reason, "flagged_by": "agent", "urgency": urgency},
-            shap_values={},
-            model_version="manual_flag",
-        )
-        db.add(entry)
-        name = aff.name
-
+    # Template fallback when LLM unavailable
+    first_name = affiliate_name.split()[0] if affiliate_name else "there"
     return (
-        f"⚠️  Risk flag created for {name}.\n"
-        f"Churn risk: {old_score:.2%} → {new_score:.2%}\n"
-        f"Health score updated to {aff.health_score:.1f}/100\n"
-        f"Reason: {reason}\nUrgency: {urgency.upper()}"
+        f"=== EMAIL DRAFT (template fallback — LLM unavailable) ===\n\n"
+        f"Subject: Following up — {affiliate_name}\n\n"
+        f"Hi {first_name},\n\n"
+        f"I wanted to reach out personally given recent activity on your account. "
+        f"Situation context: {situation}.\n\n"
+        f"I'd love to jump on a quick 20-minute call to discuss how we can best support you. "
+        f"When works for you this week?\n\n"
+        f"Tone: {tone}\n\n"
+        f"[Your Name]\nPartner Success Team"
     )
 
 
-# ─── Tool 6: Run scoring ──────────────────────────────────────────────────────
+# ─── Tool 5: get_portfolio_health ────────────────────────────────────────────
 
 @tool
-def run_scoring(affiliate_id: str = "") -> str:
-    """
-    Trigger the full scoring pipeline (churn + growth + SHAP) for one affiliate
-    or all affiliates.
+def get_portfolio_health(input_str: str = "") -> str:
+    """Get a summary of the entire affiliate portfolio health including average
+    health score, number of at-risk affiliates, high growth affiliates, and
+    churned affiliates. Use this for portfolio-level questions."""
+    db = _get_db()
+    try:
+        affiliates = db.query(Affiliate).all()
+        if not affiliates:
+            return "No affiliates found. Run POST /ingest/full first."
 
-    Input: affiliate UUID string, email address, or empty string for all affiliates.
-    Returns a summary of scores computed.
-    """
-    from src.ml.churn_model import predict as churn_predict
-    from src.ml.growth_model import predict as growth_predict
-    from src.ml.explainability import explain_affiliate
+        n = len(affiliates)
+        avg_health = sum(a.health_score or 50.0 for a in affiliates) / n
+        avg_churn = sum(a.churn_risk_score or 0.5 for a in affiliates) / n
+        avg_growth = sum(a.growth_potential_score or 0.5 for a in affiliates) / n
 
-    affiliate_ids = [affiliate_id.strip()] if affiliate_id.strip() else None
+        at_risk = [a for a in affiliates if (a.churn_risk_score or 0.0) > 0.5]
+        high_growth = [a for a in affiliates if (a.growth_potential_score or 0.0) > 0.5]
+        churned = [a for a in affiliates if (a.churn_risk_score or 0.0) > 0.8]
 
-    churn_df = churn_predict(affiliate_ids=affiliate_ids)
-    growth_df = growth_predict(affiliate_ids=affiliate_ids)
+        score_history_count = db.query(ScoreHistory).count()
 
-    if churn_df.empty:
-        return "No affiliates found to score."
+        worst = sorted(affiliates, key=lambda a: a.health_score or 50.0)[:3]
+        best = sorted(affiliates, key=lambda a: a.health_score or 50.0, reverse=True)[:3]
 
-    results = []
-    with db_session() as db:
-        for _, crow in churn_df.iterrows():
-            aid = crow["affiliate_id"]
-            grow_row = growth_df[growth_df["affiliate_id"] == aid]
-            g_score = float(grow_row["growth_potential_score"].iloc[0]) if not grow_row.empty else 0.5
-            c_score = float(crow["churn_risk_score"])
-            h_score = round(((1 - c_score) * 0.6 + g_score * 0.4) * 100, 1)
+        lines = [
+            "═══ PORTFOLIO HEALTH SUMMARY ═══",
+            f"Total affiliates:    {n}",
+            f"Avg health score:    {avg_health:.1f} / 100",
+            f"Avg churn risk:      {avg_churn:.1%}",
+            f"Avg growth potential:{avg_growth:.1%}",
+            f"Score history rows:  {score_history_count}",
+            "",
+            f"At-risk (churn > 50%):  {len(at_risk)} affiliate(s)",
+            f"High-growth (>50%):     {len(high_growth)} affiliate(s)",
+            f"Critical (churn > 80%): {len(churned)} affiliate(s)",
+            "",
+            "─── Worst 3 (needs attention) ───",
+        ]
+        for a in worst:
+            lines.append(f"  • {a.name}: health={a.health_score:.1f}, churn={a.churn_risk_score:.1%}, silent={a.days_since_contact}d")
 
-            # SHAP
-            try:
-                churn_shap = explain_affiliate(aid, model_type="churn")
-                growth_shap = explain_affiliate(aid, model_type="growth")
-            except Exception:
-                churn_shap = {}
-                growth_shap = {}
+        lines += ["", "─── Top 3 (performing well) ─────"]
+        for a in best:
+            lines.append(f"  • {a.name}: health={a.health_score:.1f}, growth={a.growth_potential_score:.1%}")
 
-            # Update affiliate row
-            aff = db.query(Affiliate).filter(Affiliate.id == aid).first()
-            if aff:
-                aff.churn_risk_score = c_score
-                aff.growth_potential_score = g_score
-                aff.health_score = h_score
+        if at_risk:
+            lines += ["", "─── At-Risk Names ───────────────"]
+            lines.append("  " + ", ".join(a.name for a in at_risk))
 
-                # Log score history
-                entry = ScoreHistory(
-                    affiliate_id=aff.id,
-                    churn_risk_score=c_score,
-                    growth_potential_score=g_score,
-                    health_score=h_score,
-                    features=crow["features"] if isinstance(crow["features"], dict) else {},
-                    shap_values={"churn": churn_shap, "growth": growth_shap},
-                )
-                db.add(entry)
-                results.append(f"  {aff.name}: churn={c_score:.2%} growth={g_score:.2%} health={h_score}")
+        return "\n".join(lines)
+    finally:
+        db.close()
 
-    summary = f"✅ Scored {len(results)} affiliate(s):\n" + "\n".join(results)
-    return summary
+
+# Expose tools list for agent setup
+TOOLS = [
+    query_database,
+    semantic_search,
+    get_affiliate_summary,
+    draft_email,
+    get_portfolio_health,
+]

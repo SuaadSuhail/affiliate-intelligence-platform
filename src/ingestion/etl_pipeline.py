@@ -25,8 +25,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.core.logging_config import get_logger
 from src.storage.database import init_db, db_session
 from src.storage.models import Affiliate, Communication
+
+logger = get_logger(__name__)
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "mock"
 
@@ -97,9 +100,9 @@ def ingest_affiliates_csv(path: Path) -> list[str]:
                         pass
 
                 ids.append(str(aff.id))
-                print(f"  ✓ Affiliate: {aff.name}")
+                logger.debug("Affiliate upserted", extra={"name": aff.name})
 
-    print(f"[etl] Affiliates ingested: {len(ids)}")
+    logger.info("Affiliates ingested", extra={"count": len(ids)})
     return ids
 
 
@@ -154,7 +157,10 @@ def ingest_communications_file(path: Path) -> list[str]:
             affiliate_id_str = block.get("affiliate_id", "").strip()
             affiliate = _find_affiliate_by_mock_id(db, affiliate_id_str)
             if not affiliate:
-                print(f"  ✗ Affiliate not found: {affiliate_id_str} — skipping")
+                logger.warning(
+                    "Affiliate not found — skipping communication",
+                    extra={"mock_id": affiliate_id_str},
+                )
                 continue
 
             occurred_at_str = block.get("occurred_at", "")
@@ -194,9 +200,12 @@ def ingest_communications_file(path: Path) -> list[str]:
                 affiliate.last_contact_at = occurred_at
                 affiliate.days_since_contact = _compute_days_since(occurred_at)
 
-            print(f"  ✓ Comm [{source}] for {affiliate.name}")
+            logger.debug(
+                "Communication inserted",
+                extra={"source": source, "affiliate": affiliate.name},
+            )
 
-    print(f"[etl] Communications ingested: {len(comm_ids)}")
+    logger.info("Communications ingested", extra={"count": len(comm_ids)})
     return comm_ids
 
 
@@ -260,19 +269,19 @@ def ingest_csv_content(csv_content: str) -> dict:
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 def run_full_pipeline() -> None:
-    print("\n═══ Affiliate Intelligence Platform — ETL Pipeline ═══\n")
+    logger.info("ETL pipeline starting")
 
-    print("1/3  Initialising database schema …")
+    logger.info("Step 1/3 — initialising database schema")
     init_db()
 
-    print("\n2/3  Ingesting affiliates …")
+    logger.info("Step 2/3 — ingesting affiliates")
     ingest_affiliates_csv(DATA_DIR / "affiliates.csv")
 
-    print("\n3/3  Ingesting communications (raw text only) …")
+    logger.info("Step 3/3 — ingesting communications (raw text only)")
     ingest_communications_file(DATA_DIR / "emails.txt")
     ingest_communications_file(DATA_DIR / "transcripts.txt")
 
-    print("\n✅  ETL complete. Run /process/nlp then /process/embeddings to finish.\n")
+    logger.info("ETL complete — run /process/nlp then /process/embeddings to finish")
 
 
 if __name__ == "__main__":

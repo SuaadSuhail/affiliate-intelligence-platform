@@ -23,12 +23,16 @@ from typing import Optional
 import spacy
 from sqlalchemy.orm import Session
 
+from src.core.logging_config import get_logger
 from src.storage.models import Affiliate, Communication
+
+logger = get_logger(__name__)
 
 # ─── spaCy: load once at module level ────────────────────────────────────────
 
 try:
     _nlp: spacy.Language = spacy.load("en_core_web_sm")
+    logger.info("spaCy model loaded", extra={"model": "en_core_web_sm"})
 except OSError as exc:
     raise RuntimeError(
         "spaCy model not found. Run: python -m spacy download en_core_web_sm"
@@ -386,6 +390,13 @@ def process_all_communications(db: Session) -> dict:
         for tag in result["tags_applied"]:
             tag_summary[tag] = tag_summary.get(tag, 0) + 1
 
+    logger.info(
+        "NLP processing complete",
+        extra={
+            "total_processed": total_processed,
+            "total_tagged": total_tagged,
+        },
+    )
     return {
         "total_processed": total_processed,
         "total_tagged": total_tagged,

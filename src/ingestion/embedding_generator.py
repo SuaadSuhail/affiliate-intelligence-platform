@@ -31,12 +31,16 @@ except ImportError as exc:
         "Run: pip install sentence-transformers"
     ) from exc
 
+from src.core.logging_config import get_logger
 from src.storage.models import Affiliate, Communication
 from src.storage.vector_store import VectorStore, vector_store
+
+logger = get_logger(__name__)
 
 # ─── Model: loaded once at module level ──────────────────────────────────────
 
 model: SentenceTransformer = SentenceTransformer("all-MiniLM-L6-v2")
+logger.info("Sentence-transformer model loaded", extra={"model": "all-MiniLM-L6-v2"})
 
 # ─── Chunking ─────────────────────────────────────────────────────────────────
 
@@ -176,6 +180,14 @@ def embed_all_communications(
         result = embed_communication(comm, db, vs)
         total_chunks += result["chunks_created"]
 
+    logger.info(
+        "Embedding complete",
+        extra={
+            "total_processed": len(unembedded),
+            "total_chunks_created": total_chunks,
+            "already_embedded": already_embedded,
+        },
+    )
     return {
         "total_processed": len(unembedded),
         "total_chunks_created": total_chunks,

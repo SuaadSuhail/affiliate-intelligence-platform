@@ -15,7 +15,11 @@ from typing import Optional
 import chromadb
 from dotenv import load_dotenv
 
+from src.core.logging_config import get_logger
+
 load_dotenv()
+
+logger = get_logger(__name__)
 
 CHROMA_HOST: str = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT: int = int(os.getenv("CHROMA_PORT", "8001"))
@@ -287,7 +291,7 @@ class VectorStore:
             self.client.heartbeat()
             return True
         except Exception as exc:  # noqa: BLE001
-            print(f"[vector_store] ChromaDB health check failed: {exc}")
+            logger.error("ChromaDB health check failed", extra={"error": str(exc)})
             return False
 
     def collection_stats(self) -> dict:

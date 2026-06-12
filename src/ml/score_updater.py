@@ -19,10 +19,13 @@ from datetime import datetime, date, timezone
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.core.logging_config import get_logger
 from src.storage.models import Affiliate, ScoreHistory
 from src.ml.feature_engineering import build_feature_vector
 from src.ml.churn_model import predict_churn_risk
 from src.ml.growth_model import predict_growth_potential
+
+logger = get_logger(__name__)
 
 
 def update_all_scores(db: Session) -> dict:
@@ -46,6 +49,8 @@ def update_all_scores(db: Session) -> dict:
     """
     affiliates = db.query(Affiliate).all()
     today = date.today()
+
+    logger.info("Scoring run started", extra={"total_affiliates": len(affiliates)})
 
     scored = 0
     health_scores: list[float] = []
@@ -75,6 +80,16 @@ def update_all_scores(db: Session) -> dict:
         # 4. Compute health_score (CLAUDE.md formula)
         health = round(((1 - churn_score) * 0.6 + growth_score * 0.4) * 100, 1)
 
+        logger.debug(
+            "Affiliate scored",
+            extra={
+                "name": aff.name,
+                "churn_risk": round(churn_score, 4),
+                "growth_potential": round(growth_score, 4),
+                "health_score": health,
+            },
+        )
+
         # 5. Update affiliate record
         aff.churn_risk_score = round(churn_score, 4)
         aff.growth_potential_score = round(growth_score, 4)
@@ -98,6 +113,15 @@ def update_all_scores(db: Session) -> dict:
     high_growth = sum(1 for a in affiliates_all if (a.growth_potential_score or 0.0) > 0.5)
     avg_health = round(sum(health_scores) / len(health_scores), 1) if health_scores else 0.0
 
+    logger.info(
+        "Scoring run complete",
+        extra={
+            "affiliates_scored": scored,
+            "avg_health_score": avg_health,
+            "at_risk_count": at_risk,
+            "high_growth_count": high_growth,
+        },
+    )
     return {
         "affiliates_scored": scored,
         "avg_health_score": avg_health,

@@ -696,3 +696,65 @@ Full end-to-end pipeline tested and working on `develop` branch:
 | Score | `POST /ml/score` | 10 affiliates scored |
 | Dashboard | `GET /ml/dashboard` | `total_affiliates: 10`, `score_history_entries: 10` |
 | Routes | `GET /openapi.json` | All 21 routes registered |
+
+---
+
+## 13. Production Hardening
+
+### Structured JSON logging
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **File** | `src/core/logging_config.py` |
+
+**What was added:**
+
+A central `src/core/logging_config.py` module replaces all `print()` calls across the codebase
+with Python's `logging` module emitting **single-line JSON** to stdout.
+
+**Output format:**
+```json
+{
+  "timestamp": "2026-06-12T17:34:09.549022+00:00",
+  "level": "INFO",
+  "module": "src.storage.database",
+  "message": "Tables created / verified.",
+  "extra": {}
+}
+```
+
+**Key functions:**
+- `configure_logging()` — called once at startup in `src/api/main.py` before any other imports; sets log level from `LOG_LEVEL` env var (default `INFO`); suppresses noisy third-party loggers (`uvicorn.access`, `httpx`, `sentence_transformers`); safe to call multiple times (no duplicate handlers)
+- `get_logger(name)` — imported and called at module level in every file (`logger = get_logger(__name__)`)
+
+**Log levels applied:**
+| Level | When used |
+|---|---|
+| `logger.debug()` | Per-record detail: individual affiliate scores, SQL query results, per-comm embedding |
+| `logger.info()` | Normal operations: tables created, pipeline steps, scoring complete, HTTP requests |
+| `logger.warning()` | Recoverable issues: affiliate not found (skipped), XGBoost fallback to rules |
+| `logger.error()` | Failures: DB health check failed, model load error, SHAP computation failed, ChromaDB unreachable |
+
+**Files updated (12 total):**
+- `src/storage/database.py` — init_db, health_check
+- `src/storage/vector_store.py` — health_check
+- `src/ingestion/etl_pipeline.py` — all pipeline steps, per-affiliate/comm logging
+- `src/ingestion/nlp_processor.py` — spaCy load, process_all summary
+- `src/ingestion/embedding_generator.py` — model load, embed_all summary
+- `src/ml/churn_model.py` — training, save, fallback warning
+- `src/ml/growth_model.py` — training, save, fallback warning
+- `src/ml/explainability.py` — model load error, SHAP failure
+- `src/ml/score_updater.py` — scoring run start/complete, per-affiliate debug
+- `src/agent/tools.py` — SQL query debug, error handling
+- `src/agent/agent.py` — agent init, init error
+- `src/api/main.py` — startup complete, request middleware
+
+**Request logging middleware** (`_RequestLoggingMiddleware` in `main.py`):
+Logs every HTTP request with method, path, status code, and duration in milliseconds:
+```json
+{"level":"INFO","module":"src.api.main","message":"HTTP request",
+ "extra":{"method":"GET","path":"/health","status_code":200,"duration_ms":526.1}}
+```
+
+**Environment variable:** `LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` (default: `INFO`)

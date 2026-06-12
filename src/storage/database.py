@@ -12,8 +12,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from src.storage.models import Base
+from src.core.logging_config import get_logger
 
 load_dotenv()
+
+logger = get_logger(__name__)
 
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
@@ -39,7 +42,7 @@ SessionLocal = sessionmaker(
 def init_db() -> None:
     """Create all tables defined in models.py if they do not exist."""
     Base.metadata.create_all(bind=engine)
-    print("[database] Tables created / verified.")
+    logger.info("Tables created / verified.")
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -85,5 +88,5 @@ def health_check() -> bool:
             conn.execute(text("SELECT 1"))
         return True
     except Exception as exc:  # noqa: BLE001
-        print(f"[database] Health check failed: {exc}")
+        logger.error("Health check failed", extra={"error": str(exc)})
         return False

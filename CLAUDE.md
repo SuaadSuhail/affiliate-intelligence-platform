@@ -331,6 +331,11 @@ The `docker-compose.yml` has all fixes applied. Do **not** re-add any of these:
   chromadb ≥ 1.0; `app` uses `service_started` instead of `service_healthy`.
 - **Port conflict resolved** — app on `8080`, chromadb on host port `8001` (container `8000`).
 - **`version:` attribute removed** — obsolete in Docker Compose v2; omit entirely.
+- **ChromaDB `health_check()` uses `list_collections()`** — `client.heartbeat()` calls
+  `/api/v1/heartbeat` which does not exist in ChromaDB ≥ 1.0, causing the `/health`
+  endpoint to always report `"chromadb": "down"` even when the container is healthy.
+  Fixed in `src/storage/vector_store.py` by replacing `heartbeat()` with
+  `list_collections()`, which verifies real connectivity. Do not revert to `heartbeat()`.
 
 ### Daily startup sequence
 

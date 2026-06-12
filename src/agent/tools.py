@@ -22,9 +22,12 @@ from typing import Optional
 from langchain.tools import tool
 from sqlalchemy import text
 
+from src.core.logging_config import get_logger
 from src.storage.database import SessionLocal
 from src.storage.models import Affiliate, Communication, ScoreHistory
 from src.storage.vector_store import vector_store
+
+logger = get_logger(__name__)
 
 def _get_db():
     """Return a fresh SessionLocal for each tool call."""
@@ -67,7 +70,7 @@ def query_database(sql_query: str) -> str:
     if not sql.upper().startswith("SELECT"):
         raise ValueError("Only SELECT statements are permitted.")
 
-    print(f"[query_database] Executing SQL: {sql}")
+    logger.debug("Executing SQL query", extra={"sql": sql})
 
     db = _get_db()
     try:
@@ -75,7 +78,7 @@ def query_database(sql_query: str) -> str:
         rows = result.fetchmany(20)
 
         if not rows:
-            print("[query_database] → 0 rows returned")
+            logger.debug("SQL query returned 0 rows")
             return "Query returned no rows."
 
         cols = list(result.keys())
@@ -85,10 +88,10 @@ def query_database(sql_query: str) -> str:
             lines.append(" | ".join(str(v) if v is not None else "NULL" for v in row))
 
         output = "\n".join(lines)
-        print(f"[query_database] → {len(rows)} rows, columns: {cols}")
+        logger.debug("SQL query complete", extra={"row_count": len(rows), "columns": cols})
         return output
     except Exception as exc:
-        print(f"[query_database] ERROR: {exc}")
+        logger.error("SQL query failed", extra={"error": str(exc)})
         return f"Database error: {exc}"
     finally:
         db.close()

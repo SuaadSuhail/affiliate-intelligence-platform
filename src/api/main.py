@@ -26,7 +26,7 @@ Run:
 
 from __future__ import annotations
 
-import logging
+import time
 import uuid as _uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +39,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
+
+# Configure structured JSON logging before any other src imports so that
+# module-level loggers (embedding_generator, nlp_processor, etc.) pick it up.
+from src.core.logging_config import configure_logging, get_logger
+
+configure_logging()
+logger = get_logger(__name__)
 
 from src.storage.database import get_db, health_check as db_health, init_db
 from src.storage.models import Affiliate, Communication, ScoreHistory
@@ -58,8 +66,6 @@ _STATIC_DIR = _BASE / "static"
 _TEMPLATES_DIR = _BASE / "templates"
 
 # ─── App ──────────────────────────────────────────────────────────────────────
-
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Affiliate Intelligence Platform",
@@ -87,6 +93,28 @@ _TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
+
+# ─── Request logging middleware ───────────────────────────────────────────────
+
+class _RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        logger.info(
+            "HTTP request",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        return response
+
+
+app.add_middleware(_RequestLoggingMiddleware)
+
 # ─── Include routers ──────────────────────────────────────────────────────────
 
 app.include_router(ingest_router, prefix="/ingest", tags=["Ingestion"])
@@ -102,8 +130,7 @@ app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 async def startup_event() -> None:
     init_db()
     routes = [r.path for r in app.routes]
-    logger.info(f"Registered {len(routes)} routes")
-    print(f"[startup] {len(routes)} routes registered.")
+    logger.info("Application startup complete", extra={"routes_registered": len(routes)})
 
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────

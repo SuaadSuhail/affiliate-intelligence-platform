@@ -19,7 +19,10 @@ import joblib
 import pandas as pd
 from xgboost import XGBClassifier
 
+from src.core.logging_config import get_logger
 from src.ml.feature_engineering import FEATURE_NAMES
+
+logger = get_logger(__name__)
 
 CHURN_MODEL_PATH = Path(os.getenv("CHURN_MODEL_PATH", "models/churn_model.pkl"))
 
@@ -109,14 +112,17 @@ def train_churn_model(df: pd.DataFrame) -> XGBClassifier:
     y = df["status"].isin(["at_risk", "churned"]).astype(int)
     X = df[FEATURE_NAMES].fillna(0)
 
-    print(f"[churn_model] Training on {len(df)} samples | churn rate: {y.mean():.1%}")
+    logger.info(
+        "Training churn model",
+        extra={"samples": len(df), "churn_rate": f"{y.mean():.1%}"},
+    )
 
     model = XGBClassifier(**_XGBOOST_PARAMS)
     model.fit(X, y, verbose=False)
 
     CHURN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, CHURN_MODEL_PATH)
-    print(f"[churn_model] Saved → {CHURN_MODEL_PATH}")
+    logger.info("Churn model saved", extra={"path": str(CHURN_MODEL_PATH)})
 
     _model = model
     return model
@@ -165,6 +171,9 @@ def predict_churn_risk(
             X = pd.DataFrame([features])[FEATURE_NAMES].fillna(0)
             return float(model.predict_proba(X)[0, 1])
         except Exception as exc:
-            print(f"[churn_model] XGBoost predict failed ({exc}), using rules")
+            logger.warning(
+                "XGBoost predict failed — falling back to rules",
+                extra={"error": str(exc)},
+            )
 
     return calculate_churn_risk_rules(features)

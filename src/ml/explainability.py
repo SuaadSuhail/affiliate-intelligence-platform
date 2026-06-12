@@ -16,9 +16,12 @@ import numpy as np
 import pandas as pd
 import shap
 
+from src.core.logging_config import get_logger
 from src.ml.feature_engineering import FEATURE_NAMES
 from src.ml.churn_model import CHURN_MODEL_PATH
 from src.ml.growth_model import GROWTH_MODEL_PATH
+
+logger = get_logger(__name__)
 
 ModelType = Literal["churn", "growth"]
 
@@ -31,7 +34,10 @@ def _load_model(model_type: ModelType):
     try:
         return joblib.load(path)
     except Exception as exc:
-        print(f"[explainability] Could not load {model_type} model: {exc}")
+        logger.error(
+            "Could not load model",
+            extra={"model_type": model_type, "path": str(path), "error": str(exc)},
+        )
         return None
 
 
@@ -97,7 +103,7 @@ def get_shap_explanation(
             shap_row = raw[0]
             base = float(explainer.expected_value)
     except Exception as exc:
-        print(f"[explainability] SHAP computation failed: {exc}")
+        logger.error("SHAP computation failed", extra={"error": str(exc)})
         shap_row = np.zeros(len(FEATURE_NAMES))
         base = 0.0
 

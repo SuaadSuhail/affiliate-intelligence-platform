@@ -21,6 +21,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from src.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "placeholder")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -74,11 +78,13 @@ def _build_agent():
 
     llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0)
 
-    return create_react_agent(
+    agent = create_react_agent(
         model=llm,
         tools=TOOLS,
         prompt=SystemMessage(content=SYSTEM_PROMPT),
     )
+    logger.info("LangGraph ReAct agent initialised", extra={"model": OPENAI_MODEL})
+    return agent
 
 
 # Module-level singleton — lazy-initialised so startup doesn't fail
@@ -95,6 +101,7 @@ def _get_agent():
             _agent = _build_agent()
         except Exception as exc:
             _init_error = str(exc)
+            logger.error("Agent initialisation failed", extra={"error": _init_error})
     if _init_error:
         raise RuntimeError(_init_error)
     return _agent

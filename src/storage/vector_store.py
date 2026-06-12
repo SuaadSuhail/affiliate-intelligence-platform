@@ -288,7 +288,7 @@ class VectorStore:
     def health_check(self) -> bool:
         """Return True if ChromaDB is reachable."""
         try:
-            self.client.heartbeat()
+            self.client.list_collections()
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("ChromaDB health check failed", extra={"error": str(exc)})

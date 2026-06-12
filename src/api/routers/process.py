@@ -13,9 +13,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from src.api.auth import get_api_key
 from src.storage.database import get_db
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
 # ─── NLP ──────────────────────────────────────────────────────────────────────

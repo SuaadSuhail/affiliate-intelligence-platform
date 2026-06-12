@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from src.api.auth import get_api_key
 from src.storage.database import get_db, db_session
 from src.storage.models import Affiliate, ScoreHistory
 
@@ -81,7 +82,7 @@ class DashboardStats(BaseModel):
 
 # ─── Train ────────────────────────────────────────────────────────────────────
 
-@router.post("/train", response_model=TrainResult)
+@router.post("/train", response_model=TrainResult, dependencies=[Depends(get_api_key)])
 def train_models(db: Session = Depends(get_db)) -> TrainResult:
     """
     Train both XGBoost models (churn + growth) on current affiliate data.
@@ -114,7 +115,7 @@ def train_models(db: Session = Depends(get_db)) -> TrainResult:
 
 # ─── Score ────────────────────────────────────────────────────────────────────
 
-@router.post("/score", response_model=ScoreResult)
+@router.post("/score", response_model=ScoreResult, dependencies=[Depends(get_api_key)])
 def score_all_affiliates(db: Session = Depends(get_db)) -> ScoreResult:
     """
     Score all affiliates using rule-based or XGBoost model (whichever is available).

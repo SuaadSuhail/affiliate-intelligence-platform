@@ -16,6 +16,7 @@ Tools
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -28,6 +29,12 @@ from src.storage.models import Affiliate, Communication, ScoreHistory
 from src.storage.vector_store import vector_store
 
 logger = get_logger(__name__)
+
+_BLOCKED_KEYWORDS = re.compile(
+    r'\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|EXEC|EXECUTE)\b',
+    re.IGNORECASE,
+)
+
 
 def _get_db():
     """Return a fresh SessionLocal for each tool call."""
@@ -68,7 +75,13 @@ def query_database(sql_query: str) -> str:
       -- finds affiliates needing urgent attention"""
     sql = sql_query.strip()
     if not sql.upper().startswith("SELECT"):
-        raise ValueError("Only SELECT statements are permitted.")
+        return "Only SELECT statements are permitted."
+
+    blocked = _BLOCKED_KEYWORDS.search(sql)
+    if blocked:
+        keyword = blocked.group(0).upper()
+        logger.warning("Blocked dangerous SQL keyword", extra={"keyword": keyword, "sql": sql[:200]})
+        return f"Blocked: query contains forbidden keyword '{keyword}'. Only safe SELECT queries are permitted."
 
     logger.debug("Executing SQL query", extra={"sql": sql})
 

@@ -41,8 +41,14 @@ services:
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-aip_user}:${POSTGRES_PASSWORD:-aip_secret}@postgres:5432/${POSTGRES_DB:-affiliate_intelligence}
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8001
+      - CHROMA_PORT=8000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - APP_ENV=${APP_ENV:-production}
+      - API_SECRET_KEY=${API_SECRET_KEY:-change-me-in-production}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:8080}
+      - POSTGRES_USER=${POSTGRES_USER:-aip_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aip_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-affiliate_intelligence}
     ports:
       - "8080:8080"
     volumes:

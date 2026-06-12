@@ -758,3 +758,76 @@ Logs every HTTP request with method, path, status code, and duration in millisec
 ```
 
 **Environment variable:** `LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` (default: `INFO`)
+
+---
+
+### API security hardening
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/api/auth.py` (new), `src/api/main.py`, `src/api/routers/*.py`, `src/agent/tools.py` |
+
+**What was added:**
+
+#### 1. CORS — env-driven origin allowlist
+
+`src/api/main.py` reads `ALLOWED_ORIGINS` from the environment (comma-separated) instead of using `allow_origins=["*"]`.
+
+- Default (dev): `http://localhost:8080,http://localhost:3000`
+- `allow_methods` narrowed from `["*"]` to `["GET", "POST"]`
+- `.env.example` has `ALLOWED_ORIGINS=http://localhost:8080,http://localhost:3000`
+
+#### 2. API key authentication
+
+`src/api/auth.py` — FastAPI `Depends()` dependency:
+
+- Reads `X-API-Key` header; compares to `API_SECRET_KEY` env var
+- Returns HTTP 401 if header is missing or wrong
+- Returns HTTP 500 if `API_SECRET_KEY` is not set in production
+- **Bypassed when `APP_ENV=development`** (default for local dev via uvicorn)
+
+**Protected routes (require X-API-Key in production):**
+
+| Router | Routes protected |
+|---|---|
+| `ingest.py` | All 4 POST routes (router-level dependency) |
+| `process.py` | All 3 POST routes (router-level dependency) |
+| `ml.py` | `POST /ml/train`, `POST /ml/score` |
+| `agent.py` | `POST /agent/chat`, `POST /agent/quick` |
+
+**Unprotected routes** (no auth needed): all GET routes, `GET /agent/demo`, `GET /health`
+
+#### 3. SQL injection hardening
+
+`src/agent/tools.py` — `query_database` tool now blocks dangerous SQL keywords in addition to the existing SELECT-only check:
+
+- Pattern: `\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|EXEC|EXECUTE)\b` (word-boundary, case-insensitive)
+- Returns a safe error string (not an exception) so the agent can handle it gracefully
+- Logs a `logger.warning()` with the blocked keyword and truncated query
+
+#### 4. Startup validation
+
+`src/api/main.py` `startup_event()` now validates env vars before initialising the DB:
+
+- Missing `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` → raises `RuntimeError` (app refuses to start)
+- `OPENAI_API_KEY` missing or `"placeholder"` → `logger.warning()` (non-fatal; agent endpoints will fail at call time)
+
+#### 5. docker-compose.yml updates
+
+- `CHROMA_PORT=8001` → `CHROMA_PORT=8000` (container-to-container uses internal port)
+- Added to app environment: `APP_ENV`, `API_SECRET_KEY`, `ALLOWED_ORIGINS`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- Docker default: `APP_ENV=production` (auth enforced); override with `APP_ENV=development` to skip auth
+
+**Test auth locally (with Docker running):**
+```bash
+# Should return 401 (auth required in production mode)
+curl -X POST http://localhost:8080/ingest/full
+
+# Should return 200 (correct key)
+curl -X POST http://localhost:8080/ingest/full \
+  -H "X-Api-Key: change-me-in-production"
+
+# Health check still open (no auth)
+curl http://localhost:8080/health
+```

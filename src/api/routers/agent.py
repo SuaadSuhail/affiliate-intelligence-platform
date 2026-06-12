@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+from src.api.auth import get_api_key
 
 router = APIRouter()
 
@@ -43,7 +45,7 @@ class DemoResult(BaseModel):
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, dependencies=[Depends(get_api_key)])
 def agent_chat(request: ChatRequest) -> ChatResponse:
     """
     Send a message to the LangChain ReAct agent with optional conversation history.
@@ -67,7 +69,7 @@ def agent_chat(request: ChatRequest) -> ChatResponse:
     )
 
 
-@router.post("/quick", response_model=ChatResponse)
+@router.post("/quick", response_model=ChatResponse, dependencies=[Depends(get_api_key)])
 def agent_quick(request: QuickRequest) -> ChatResponse:
     """
     Single-turn agent query with no conversation history.

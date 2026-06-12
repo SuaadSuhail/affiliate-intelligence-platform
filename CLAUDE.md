@@ -680,6 +680,7 @@ These files had stale imports and old schema field names that caused runtime fai
 - Main.py `AffiliateOut` updated to new schema (`status`, `revenue_30d`, `days_since_contact` — no `email`/`tier`/`company`)
 - `ScoreHistoryOut` updated (no `shap_values`/`model_version` in new schema)
 - `list_affiliates` filter updated (no `tier`/`niche` filter, use `status` instead)
+- `POST /agent/chat` fetch includes `X-Api-Key: change-me-in-production` header (required after auth hardening); `/ml/dashboard` and `/affiliates` are GET routes and remain headerless
 
 ---
 

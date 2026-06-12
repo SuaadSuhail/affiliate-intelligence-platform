@@ -609,7 +609,10 @@
     try {
       const res = await fetch('/agent/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': 'change-me-in-production',
+        },
         body: JSON.stringify({
           message: text,
           conversation_history: conversationHistory,

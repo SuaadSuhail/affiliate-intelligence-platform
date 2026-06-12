@@ -286,9 +286,13 @@ class VectorStore:
     # ── Utility ───────────────────────────────────────────────────────────────
 
     def health_check(self) -> bool:
-        """Return True if ChromaDB is reachable."""
+        """Return True if ChromaDB is reachable.
+
+        Uses list_collections() instead of heartbeat() because the
+        /api/v1/heartbeat path does not exist in ChromaDB >= 1.0.
+        """
         try:
-            self.client.heartbeat()
+            self.client.list_collections()
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("ChromaDB health check failed", extra={"error": str(exc)})

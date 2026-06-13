@@ -78,14 +78,14 @@ def test_query_database_valid_select():
 # ─── Test 2: query_database — non-SELECT rejected ─────────────────────────────
 
 def test_query_database_rejects_non_select():
-    """Non-SELECT queries must raise ValueError."""
+    """Non-SELECT queries must return a safe error string (not raise)."""
     from src.agent.tools import query_database
 
-    with pytest.raises(ValueError, match="Only SELECT"):
-        query_database.invoke("DROP TABLE affiliates")
+    result_drop = query_database.invoke("DROP TABLE affiliates")
+    assert "only select" in result_drop.lower() or "not allowed" in result_drop.lower() or "blocked" in result_drop.lower()
 
-    with pytest.raises(ValueError, match="Only SELECT"):
-        query_database.invoke("UPDATE affiliates SET health_score=0")
+    result_update = query_database.invoke("UPDATE affiliates SET health_score=0")
+    assert "only select" in result_update.lower() or "not allowed" in result_update.lower() or "blocked" in result_update.lower()
 
 
 # ─── Test 3: get_affiliate_summary — known affiliate ─────────────────────────
@@ -219,16 +219,16 @@ def test_agent_initialises_with_api_key():
 
     with (
         patch.dict("os.environ", {"OPENAI_API_KEY": fake_key}),
-        patch("src.agent.agent.OPENAI_API_KEY", fake_key),
         patch("langchain_openai.ChatOpenAI") as mock_llm_cls,
         patch("langgraph.prebuilt.create_react_agent") as mock_create,
     ):
         mock_llm_cls.return_value = MagicMock()
         mock_create.return_value = MagicMock()
 
-        # Reset singleton so build is triggered
+        # Reset singleton so build is triggered fresh with the patched key
         agent_mod._agent = None
         agent_mod._init_error = None
+        agent_mod._agent_key = None
 
         agent = agent_mod._get_agent()
         assert agent is not None

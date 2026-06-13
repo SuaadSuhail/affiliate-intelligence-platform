@@ -730,6 +730,35 @@ Full end-to-end pipeline tested and working on `develop` branch:
 
 ## 13. Production Hardening
 
+### Week 1 — Complete
+
+- Structured JSON logging via `src/core/logging_config.py`
+- API key authentication on all write endpoints via `src/api/auth.py`
+- CORS restricted to `ALLOWED_ORIGINS` env var
+- SQL injection hardening on `query_database` tool
+- Startup validation for required env vars
+- OpenAI retry logic with exponential backoff via tenacity (3 attempts, 1–10s backoff)
+- 30-second timeout on `draft_email` LLM call
+- `GET /agent/health` endpoint
+- Background tasks for long-running operations: `POST /ml/train`, `/ml/score`, `POST /process/full`, `/ingest/full`
+- Task status polling via `GET /task/{task_id}`
+- Frontend pipeline buttons with live polling
+- Model fixed to `gpt-4o-mini` via env var
+
+### Week 2 — Planned
+
+- Alembic database migrations
+- S3 model storage and versioning
+- Switch ChromaDB to pgvector on PostgreSQL
+
+### Week 3-4 — Planned
+
+- AWS deployment (EC2 then ECS Fargate)
+- CloudWatch structured logging
+- RDS PostgreSQL with automated backups
+
+---
+
 ### Structured JSON logging
 
 | | |
@@ -860,3 +889,51 @@ curl -X POST http://localhost:8080/ingest/full \
 # Health check still open (no auth)
 curl http://localhost:8080/health
 ```
+
+---
+
+### OpenAI reliability
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/agent/agent.py`, `src/agent/tools.py` |
+
+**What was added:**
+
+- **tenacity retry** on `_invoke_agent()`: `RateLimitError` and `APITimeoutError` trigger exponential backoff (1s–10s), up to 3 attempts; final failure returns `_UNAVAILABLE_MSG` instead of raising
+- **`_agent_key` tracking**: singleton resets and rebuilds automatically if `OPENAI_API_KEY` changes between requests — errors never cache permanently
+- **30-second timeout** on the `draft_email` `ChatOpenAI` instance (`timeout=30`)
+- **`GET /agent/health`** returns `{agent_ready, openai_key_configured, model, last_error}` with no API call — safe for readiness probes
+- **Model fixed to `gpt-4o-mini`**: both agent and tools use `gpt-4o-mini`; `OPENAI_MODEL` env var removed from `.env.example` to prevent accidental override
+
+---
+
+### Background tasks
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/api/task_store.py` (new), `src/api/routers/ml.py`, `src/api/routers/process.py`, `src/api/routers/ingest.py`, `src/api/main.py`, `src/api/templates/index.html` |
+
+**What was added:**
+
+`POST /ml/train`, `POST /ml/score`, `POST /process/full`, and `POST /ingest/full` all returned from blocking HTTP worker threads. Moved to FastAPI `BackgroundTasks` so they return immediately with a `task_id`.
+
+**`src/api/task_store.py`** — 25-line in-memory store:
+- `set_task(task_id, status, result, error)` — sets task state
+- `get_task(task_id)` — retrieves task by id
+- Resets on process restart (acceptable for demo/dev)
+
+**`GET /task/{task_id}`** — added to `main.py`; returns `{task_id, status, result, error}` or 404.
+
+**Background task pattern** — each task function:
+1. Is named `_run_<operation>_task(task_id: str)`
+2. Calls `set_task(task_id, "running")` at start
+3. Creates its own `db = SessionLocal()` (never shares the HTTP request session, which closes before the task runs)
+4. Calls `set_task(task_id, "complete", result=...)` on success or `set_task(task_id, "failed", error=...)` on failure
+5. Closes `db` in `finally`
+
+**Frontend pipeline buttons** — left panel now shows 4 pipeline control buttons (Ingest, Process, Train, Score). On click: sends POST, receives `task_id`, polls `GET /task/{task_id}` every 2 seconds, shows ⏳/✓/✗ status, and calls `loadData()` on completion to refresh the affiliate list.
+
+**Task lifecycle:** `pending → running → complete | failed`

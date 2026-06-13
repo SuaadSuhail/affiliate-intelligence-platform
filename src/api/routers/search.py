@@ -28,28 +28,22 @@ router = APIRouter()
 class CommunicationOut(BaseModel):
     id: str
     affiliate_id: str
-    channel: str
-    direction: str
-    subject: Optional[str]
-    content_preview: str
-    sentiment_score: Optional[float]
-    sentiment_label: Optional[str]
+    source: str
+    raw_text_preview: str
+    sentiment_score: float
     tags: list[str]
     embedding_id: Optional[str]
     occurred_at: Optional[str]
 
     @classmethod
     def from_orm(cls, c: Communication) -> "CommunicationOut":
-        raw = c.content or ""
+        raw = c.raw_text or ""
         return cls(
             id=str(c.id),
             affiliate_id=str(c.affiliate_id),
-            channel=c.channel,
-            direction=c.direction,
-            subject=c.subject,
-            content_preview=raw[:200] + ("…" if len(raw) > 200 else ""),
-            sentiment_score=c.sentiment_score,
-            sentiment_label=c.sentiment_label,
+            source=c.source or "",
+            raw_text_preview=raw[:200] + ("…" if len(raw) > 200 else ""),
+            sentiment_score=c.sentiment_score or 0.0,
             tags=c.tags or [],
             embedding_id=c.embedding_id,
             occurred_at=c.occurred_at.isoformat() if c.occurred_at else None,
@@ -67,15 +61,15 @@ class SearchResultItem(BaseModel):
 
 @router.get("/communications", response_model=list[CommunicationOut])
 def list_communications(
-    channel: Optional[str] = Query(None, description="Filter: email|call|chat|ticket"),
+    source: Optional[str] = Query(None, description="Filter: email|call|api_event"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[CommunicationOut]:
     """List all communications with tags and sentiment scores."""
     q = db.query(Communication).order_by(Communication.occurred_at.desc())
-    if channel:
-        q = q.filter(Communication.channel == channel.lower())
+    if source:
+        q = q.filter(Communication.source == source.lower())
     comms = q.offset(offset).limit(limit).all()
     return [CommunicationOut.from_orm(c) for c in comms]
 
@@ -110,12 +104,12 @@ def search(
     Uses sentence-transformers/all-MiniLM-L6-v2 to encode the query, then
     returns the closest matching communication chunks from ChromaDB.
     """
-    from src.ingestion.embedding_generator import get_generator
+    from src.ingestion.embedding_generator import model, vector_store
 
-    gen = get_generator()
+    query_embedding = model.encode(q).tolist()
     try:
-        results = gen.search_communications(
-            query=q,
+        results = vector_store.search_similar(
+            query_embedding=query_embedding,
             n_results=n,
             affiliate_id=affiliate_id,
         )
@@ -124,10 +118,10 @@ def search(
 
     return [
         SearchResultItem(
-            id=r["id"],
-            document=r["document"],
-            metadata=r["metadata"],
-            distance=r["distance"],
+            id=r.get("id", ""),
+            document=r.get("text", r.get("document", "")),
+            metadata=r.get("metadata", {}),
+            distance=r.get("distance", 0.0),
         )
         for r in results
     ]

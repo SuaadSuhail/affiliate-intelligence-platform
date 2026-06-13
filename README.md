@@ -229,6 +229,20 @@ Navigate to **[http://localhost:8080](http://localhost:8080)**
 
 ---
 
+## Security
+
+All write endpoints require an API key header:
+
+```
+X-Api-Key: your-secret-key
+```
+
+Set `API_SECRET_KEY` in your `.env` file. Set `ALLOWED_ORIGINS` to your domain in production.
+
+In development (`APP_ENV=development`) auth is bypassed automatically.
+
+---
+
 ## Tests
 
 ```bash

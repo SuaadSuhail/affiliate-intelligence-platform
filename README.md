@@ -229,6 +229,20 @@ Navigate to **[http://localhost:8080](http://localhost:8080)**
 
 ---
 
+## Model storage
+
+Models are saved locally to `models/` by default.
+
+For production, set `USE_S3=true` in `.env` and provide `S3_BUCKET`. Models are automatically uploaded after training and downloaded on first use if not present locally.
+
+Works with any S3-compatible storage:
+- **AWS S3** — leave `S3_ENDPOINT_URL` empty
+- **DigitalOcean Spaces** — `https://nyc3.digitaloceanspaces.com`
+- **Cloudflare R2** — `https://<acct>.r2.cloudflarestorage.com`
+- **Backblaze B2** — `https://s3.us-west-002.backblazeb2.com`
+
+---
+
 ## Database migrations
 
 This project uses [Alembic](https://alembic.sqlalchemy.org/) for schema management.

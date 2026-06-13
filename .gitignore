@@ -19,6 +19,7 @@ env/
 chroma_db/
 models/*.pkl
 models/*.joblib
+models/*.json
 data/processed/
 
 # OS

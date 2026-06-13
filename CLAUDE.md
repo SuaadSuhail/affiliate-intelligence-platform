@@ -971,3 +971,26 @@ alembic revision --autogenerate -m "description"
 # Rollback one step
 alembic downgrade -1
 ```
+
+---
+
+### S3 model storage
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/data-persistence` branch |
+| **File** | `src/ml/model_store.py` (new) |
+
+**What was added:**
+
+- `src/ml/model_store.py` — thin abstraction over local disk + S3-compatible object storage:
+  - `save_model(model, filename)` — writes with joblib locally, then uploads to S3 if `USE_S3=true`
+  - `load_model(filename)` — returns from local disk; if missing and `USE_S3=true`, downloads from S3 first
+  - `model_exists(filename)` — checks local disk first, then S3 via `head_object`
+  - `_get_s3_client()` — creates a boto3 client; `S3_ENDPOINT_URL` makes it work with any S3-compatible platform (DigitalOcean Spaces, Cloudflare R2, Backblaze B2)
+- `USE_S3=false` by default — works locally with no cloud credentials required
+- `boto3` added to `requirements.txt`
+- `churn_model.py` and `growth_model.py` updated: `joblib.dump/load` calls replaced with `save_model` / `load_model`; `CHURN_MODEL_PATH` / `GROWTH_MODEL_PATH` env vars and direct `os`/`Path`/`joblib` imports removed
+- `models/*.json` added to `.gitignore`
+- `.env.example` extended with all S3 variables (`USE_S3`, `S3_BUCKET`, `S3_MODEL_PREFIX`, `S3_ENDPOINT_URL`, `AWS_*`)
+- README `Model storage` section added

@@ -6,6 +6,7 @@ LangChain ReAct agent endpoints.
 POST /agent/chat   — full conversation with history support
 POST /agent/quick  — single-turn query, no history
 GET  /agent/demo   — runs 3 pre-set demo questions
+GET  /agent/health — agent readiness check (no API call made)
 """
 
 from __future__ import annotations
@@ -41,6 +42,13 @@ class DemoResult(BaseModel):
     question: str
     response: str
     tools_used: list[str]
+
+
+class AgentHealthResponse(BaseModel):
+    agent_ready: bool
+    openai_key_configured: bool
+    model: str
+    last_error: Optional[str] = None
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -89,6 +97,17 @@ def agent_quick(request: QuickRequest) -> ChatResponse:
         tools_used=result["tools_used"],
         message_count=1,
     )
+
+
+@router.get("/health", response_model=AgentHealthResponse)
+def agent_health() -> AgentHealthResponse:
+    """
+    Check agent readiness without making any API call.
+    Returns whether the agent is initialised, the OpenAI key is set,
+    the model name, and the last initialisation error (if any).
+    """
+    from src.agent.agent import get_agent_status
+    return AgentHealthResponse(**get_agent_status())
 
 
 @router.get("/demo", response_model=list[DemoResult])

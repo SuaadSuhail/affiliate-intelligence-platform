@@ -52,7 +52,7 @@ def _get_llm():
         if not api_key or api_key == "placeholder":
             return None
         from langchain_openai import ChatOpenAI
-        _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        _llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, timeout=30)
     return _llm
 
 

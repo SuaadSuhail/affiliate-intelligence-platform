@@ -636,7 +636,7 @@ These files had stale imports and old schema field names that caused runtime fai
 | `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
 | `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
 
-**API endpoints:** `POST /agent/chat` (with history), `POST /agent/quick` (single-turn), `GET /agent/demo`
+**API endpoints:** `POST /agent/chat` (with history), `POST /agent/quick` (single-turn), `GET /agent/demo`, `GET /agent/health`
 
 **Important implementation notes:**
 - All tools create a fresh `SessionLocal()` per call (not shared) and close it in `finally`
@@ -644,7 +644,14 @@ These files had stale imports and old schema field names that caused runtime fai
   XGBoost via joblib inside a LangGraph tool context causes a segfault in uvicorn)
 - `CHROMA_MODEL_PATH` in `.env` overrides the default path — ensure models are retrained
   if `.env` changes the path or after switching branches
-- Agent singleton is lazy — `_init_error` is set on first failure and returned on every call
+- Agent singleton tracks `_agent_key` (the OPENAI_API_KEY active at build time); if the key
+  changes between requests, the singleton resets and rebuilds — errors never cache permanently
+- `_invoke_agent()` wraps the LangGraph `agent.invoke()` call with tenacity retry:
+  `RateLimitError` and `APITimeoutError` trigger exponential backoff (1s→10s), up to 3 attempts;
+  on final failure returns `_UNAVAILABLE_MSG` instead of raising
+- `draft_email` LLM is instantiated with `timeout=30` to prevent indefinite hangs
+- `GET /agent/health` returns `{agent_ready, openai_key_configured, model, last_error}` with no
+  API call — useful for readiness checks without spending tokens
 - Demo endpoint (`GET /agent/demo`) runs 3 questions sequentially; requires models trained first
 
 **Depends on:** All pipeline steps must have run: `/ingest/full` → `/process/nlp` →

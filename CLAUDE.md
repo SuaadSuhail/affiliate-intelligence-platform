@@ -745,9 +745,9 @@ Full end-to-end pipeline tested and working on `develop` branch:
 - Frontend pipeline buttons with live polling
 - Model fixed to `gpt-4o-mini` via env var
 
-### Week 2 — Planned
+### Week 2 — In progress
 
-- Alembic database migrations
+- Alembic database migrations ✓
 - S3 model storage and versioning
 - Switch ChromaDB to pgvector on PostgreSQL
 
@@ -937,3 +937,37 @@ curl http://localhost:8080/health
 **Frontend pipeline buttons** — left panel now shows 4 pipeline control buttons (Ingest, Process, Train, Score). On click: sends POST, receives `task_id`, polls `GET /task/{task_id}` every 2 seconds, shows ⏳/✓/✗ status, and calls `loadData()` on completion to refresh the affiliate list.
 
 **Task lifecycle:** `pending → running → complete | failed`
+
+---
+
+### Database migrations (Alembic)
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/data-persistence` branch |
+| **Files** | `alembic.ini`, `alembic/env.py`, `alembic/versions/13ea16583831_initial_schema_affiliates_.py` |
+
+**What was added:**
+
+- `alembic` added to `requirements.txt`
+- `alembic init alembic` run in project root; `alembic.ini` and `alembic/` directory created
+- `alembic/env.py` configured to load `DATABASE_URL` from `.env` via `python-dotenv` and set `target_metadata = Base.metadata`; all three models imported so autogenerate detects them
+- Initial migration written manually (`13ea16583831`) with `CREATE TABLE` for `affiliates`, `communications`, `score_history` plus both ENUM types; `downgrade()` drops them in reverse order
+- Existing database stamped with `alembic stamp head` (tables already existed from `create_all()`)
+- `src/storage/database.py` `init_db()` no longer calls `Base.metadata.create_all()` — replaced with a connection health check; comment reads `Schema managed by Alembic migrations — Run: alembic upgrade head`
+- `src/api/main.py` startup now runs `alembic upgrade head` before accepting traffic (safe to run on every restart — Alembic is idempotent)
+- `alembic/versions/__pycache__/` added to `.gitignore`
+- `.env.example` annotated with `# Run migrations: alembic upgrade head`
+- README `Database migrations` section added
+
+**Running migrations:**
+```bash
+# Apply all pending migrations (runs automatically on app startup too)
+alembic upgrade head
+
+# Create a new migration after ORM model changes
+alembic revision --autogenerate -m "description"
+
+# Rollback one step
+alembic downgrade -1
+```

@@ -28,6 +28,9 @@ Thumbs.db
 # VS Code
 .vscode/settings.json
 
+# Alembic
+alembic/versions/__pycache__/
+
 # Logs
 *.log
 logs/

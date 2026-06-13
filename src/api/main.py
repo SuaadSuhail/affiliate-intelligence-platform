@@ -49,7 +49,7 @@ from src.core.logging_config import configure_logging, get_logger
 configure_logging()
 logger = get_logger(__name__)
 
-from src.storage.database import get_db, health_check as db_health, init_db
+from src.storage.database import get_db, health_check as db_health
 from src.storage.models import Affiliate, Communication, ScoreHistory
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
@@ -146,7 +146,15 @@ async def startup_event() -> None:
     if not openai_key or openai_key == "placeholder":
         logger.warning("OPENAI_API_KEY is not configured — agent endpoints will be unavailable")
 
-    init_db()
+    # Apply any pending Alembic migrations before accepting traffic
+    from pathlib import Path as _Path
+    from alembic.config import Config
+    from alembic import command as alembic_command
+    _alembic_ini = _Path(__file__).parent.parent.parent / "alembic.ini"
+    alembic_cfg = Config(str(_alembic_ini))
+    alembic_command.upgrade(alembic_cfg, "head")
+    logger.info("Database migrations applied")
+
     routes = [r.path for r in app.routes]
     logger.info("Application startup complete", extra={"routes_registered": len(routes)})
 

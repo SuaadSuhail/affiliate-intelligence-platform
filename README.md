@@ -229,6 +229,27 @@ Navigate to **[http://localhost:8080](http://localhost:8080)**
 
 ---
 
+## Database migrations
+
+This project uses [Alembic](https://alembic.sqlalchemy.org/) for schema management.
+
+Apply migrations (automatically run on app startup, or manually):
+```bash
+alembic upgrade head
+```
+
+Create a new migration after schema changes:
+```bash
+alembic revision --autogenerate -m "description"
+```
+
+Rollback one migration:
+```bash
+alembic downgrade -1
+```
+
+---
+
 ## Security
 
 All write endpoints require an API key header:

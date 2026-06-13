@@ -242,28 +242,49 @@ via `app.include_router(...)`. Startup logs the total registered route count.
 | Method | Path | Router file | Description |
 |---|---|---|---|
 | GET | `/health` | main.py | Service health check (PostgreSQL + ChromaDB) |
+| GET | `/task/{task_id}` | main.py | Poll status of a background task |
 | GET | `/affiliates` | main.py | List affiliates with filtering + sorting |
 | GET | `/affiliates/{id}` | main.py | Single affiliate with score history |
 | GET | `/affiliates/{id}/communications` | main.py | Paginated communications |
 | POST | `/affiliates/{id}/score` | main.py | Trigger re-scoring for one affiliate |
 | POST | `/agent/chat` | main.py | Chat with the LangChain ReAct agent |
-| POST | `/ingest/full` | routers/ingest.py | Run full ETL from mock data files |
+| POST | `/ingest/full` | routers/ingest.py | Start ETL in background; returns task_id |
 | POST | `/ingest/affiliates` | routers/ingest.py | Re-ingest affiliates CSV only |
 | POST | `/ingest/communications` | routers/ingest.py | Re-ingest emails + transcripts |
 | POST | `/ingest/csv` | routers/ingest.py | Upload affiliates CSV file |
 | POST | `/process/nlp` | routers/process.py | Tag all untagged communications |
 | POST | `/process/embeddings` | routers/process.py | Embed all unembedded communications |
-| POST | `/process/full` | routers/process.py | NLP + embeddings end-to-end |
+| POST | `/process/full` | routers/process.py | Start NLP + embeddings in background; returns task_id |
 | GET | `/communications` | routers/search.py | List all communications with tags |
 | GET | `/communications/{id}` | routers/search.py | Single communication by UUID |
 | GET | `/search` | routers/search.py | Semantic search; params: `q`, `affiliate_id`, `n` |
-| POST | `/ml/train` | routers/ml.py | Train churn + growth XGBoost models |
-| POST | `/ml/score` | routers/ml.py | Score all affiliates and persist results |
+| POST | `/ml/train` | routers/ml.py | Start model training in background; returns task_id |
+| POST | `/ml/score` | routers/ml.py | Start affiliate scoring in background; returns task_id |
 | GET | `/ml/scores` | routers/ml.py | List current affiliate scores |
 | GET | `/ml/explain/{id}` | routers/ml.py | SHAP feature importances for one affiliate |
 | GET | `/ml/dashboard` | routers/ml.py | Aggregate health stats across all affiliates |
 
-**Total: 21 routes**
+**Total: 22 routes** (added `GET /task/{task_id}`)
+
+### Background task pattern
+
+`POST /ml/train`, `POST /ml/score`, `POST /process/full`, and `POST /ingest/full`
+are now **non-blocking** and return immediately:
+
+```json
+{"status": "accepted", "task_id": "uuid", "message": "...Poll GET /task/{task_id}..."}
+```
+
+Task lifecycle: `pending → running → complete | failed`
+
+State is held in `src/api/task_store.py` (in-memory dict; resets on process restart).
+Each background function creates its own `SessionLocal()` — it never shares the
+HTTP request's DB session (which is closed before the task runs).
+
+Poll response schema:
+```json
+{"task_id": "...", "status": "complete", "result": {...}, "error": null}
+```
 
 ---
 

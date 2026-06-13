@@ -248,6 +248,18 @@ def health() -> dict:
     }
 
 
+# ─── Tasks ────────────────────────────────────────────────────────────────────
+
+@app.get("/task/{task_id}", tags=["Tasks"])
+def get_task_status(task_id: str) -> dict:
+    """Poll the status of a background task by its task_id."""
+    from src.api.task_store import get_task
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
+
+
 # ─── Affiliates ───────────────────────────────────────────────────────────────
 
 @app.get("/affiliates", response_model=list[AffiliateOut], tags=["Affiliates"])

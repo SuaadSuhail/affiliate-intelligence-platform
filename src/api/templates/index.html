@@ -385,6 +385,45 @@
     .send-btn:active { transform: scale(0.94); }
     .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
 
+    /* ── Pipeline controls ───────────────────────────────────── */
+    .pipeline-section {
+      padding: 8px 12px 12px;
+      border-bottom: 1px solid #2d3050;
+    }
+    .pipeline-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: #8b90a8;
+      margin-bottom: 7px;
+    }
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+    }
+    .pipe-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .pipe-btn {
+      background: #2d3050;
+      border: 1px solid #3d4265;
+      color: #c0c4d8;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .pipe-btn:hover:not(:disabled) { background: #3d4265; color: #e8eaf0; }
+    .pipe-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .pipe-status { font-size: 10px; color: #8b90a8; }
+
     /* ── Responsive ──────────────────────────────────────────── */
     @media (max-width: 700px) {
       body { flex-direction: column; }
@@ -425,6 +464,28 @@
     <div class="stat-card good">
       <div class="stat-value" id="statGrowth">—</div>
       <div class="stat-label">High Growth</div>
+    </div>
+  </div>
+
+  <div class="pipeline-section">
+    <div class="pipeline-label">Pipeline</div>
+    <div class="pipeline-grid">
+      <div class="pipe-row">
+        <button class="pipe-btn" id="pipe-ingest" onclick="runPipeline('/ingest/full','ingest')">Ingest</button>
+        <span class="pipe-status" id="status-ingest"></span>
+      </div>
+      <div class="pipe-row">
+        <button class="pipe-btn" id="pipe-process" onclick="runPipeline('/process/full','process')">Process</button>
+        <span class="pipe-status" id="status-process"></span>
+      </div>
+      <div class="pipe-row">
+        <button class="pipe-btn" id="pipe-train" onclick="runPipeline('/ml/train','train')">Train</button>
+        <span class="pipe-status" id="status-train"></span>
+      </div>
+      <div class="pipe-row">
+        <button class="pipe-btn" id="pipe-score" onclick="runPipeline('/ml/score','score')">Score</button>
+        <span class="pipe-status" id="status-score"></span>
+      </div>
     </div>
   </div>
 
@@ -713,6 +774,57 @@
     btn.disabled = val;
     dot.style.background = val ? '#f59e0b' : '#10b981';
     dot.title = val ? 'Agent thinking…' : 'Agent ready';
+  }
+
+  // ── Pipeline background tasks ─────────────────────────────────────────────
+  async function runPipeline(endpoint, key) {
+    const btn = document.getElementById('pipe-' + key);
+    const statusEl = document.getElementById('status-' + key);
+    btn.disabled = true;
+    statusEl.textContent = '⏳';
+    statusEl.style.color = '#f59e0b';
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'X-Api-Key': 'change-me-in-production' },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        statusEl.textContent = '✗ ' + (err.detail || 'failed');
+        statusEl.style.color = '#f87171';
+        btn.disabled = false;
+        return;
+      }
+      const { task_id } = await res.json();
+      const poll = setInterval(async () => {
+        try {
+          const tr = await fetch('/task/' + task_id);
+          const task = await tr.json();
+          if (task.status === 'complete') {
+            clearInterval(poll);
+            statusEl.textContent = '✓';
+            statusEl.style.color = '#10b981';
+            btn.disabled = false;
+            loadData();
+          } else if (task.status === 'failed') {
+            clearInterval(poll);
+            statusEl.textContent = '✗ ' + (task.error || 'failed');
+            statusEl.style.color = '#f87171';
+            btn.disabled = false;
+          }
+        } catch (_) {
+          clearInterval(poll);
+          statusEl.textContent = '✗';
+          statusEl.style.color = '#f87171';
+          btn.disabled = false;
+        }
+      }, 2000);
+    } catch (_) {
+      statusEl.textContent = '✗';
+      statusEl.style.color = '#f87171';
+      btn.disabled = false;
+    }
   }
 </script>
 

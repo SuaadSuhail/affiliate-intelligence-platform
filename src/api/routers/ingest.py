@@ -13,28 +13,51 @@ from __future__ import annotations
 
 import io
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from src.api.auth import get_api_key
+from src.api.task_store import set_task
+from src.core.logging_config import get_logger
 from src.storage.database import get_db
 
+logger = get_logger(__name__)
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
 
-@router.post("/full")
-def ingest_full() -> dict:
-    """
-    Run the complete ETL pipeline from mock data files.
-    Steps: affiliates.csv → emails.txt → transcripts.txt → ChromaDB profiles.
-    """
+# ─── Background task ──────────────────────────────────────────────────────────
+
+def _run_ingest_full_task(task_id: str) -> None:
+    """Run the full ETL pipeline in a background thread."""
+    set_task(task_id, "running")
+    logger.info("Ingest full task started", extra={"task_id": task_id})
     try:
         from src.ingestion.etl_pipeline import run_full_pipeline
         run_full_pipeline()
-        return {"status": "complete", "message": "Full ETL pipeline finished"}
+        set_task(task_id, "complete", result={"status": "complete", "message": "Full ETL pipeline finished"})
+        logger.info("Ingest full task complete", extra={"task_id": task_id})
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"ETL error: {exc}")
+        logger.error("Ingest full task failed", extra={"task_id": task_id, "error": str(exc)})
+        set_task(task_id, "failed", error=str(exc))
+
+
+@router.post("/full")
+async def ingest_full(background_tasks: BackgroundTasks) -> dict:
+    """
+    Run the complete ETL pipeline in the background.
+    Steps: affiliates.csv → emails.txt → transcripts.txt → ChromaDB profiles.
+    Returns immediately with a task_id. Poll GET /task/{task_id} for status.
+    """
+    task_id = str(uuid4())
+    set_task(task_id, "pending")
+    background_tasks.add_task(_run_ingest_full_task, task_id)
+    return {
+        "status": "accepted",
+        "task_id": task_id,
+        "message": f"Ingest started in background. Poll GET /task/{task_id} for status.",
+    }
 
 
 @router.post("/affiliates")

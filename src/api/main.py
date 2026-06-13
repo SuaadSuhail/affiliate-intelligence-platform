@@ -26,6 +26,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import time
 import uuid as _uuid
 from datetime import datetime
@@ -78,11 +79,19 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+ALLOWED_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:8080,http://localhost:3000"
+    ).split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -128,6 +137,15 @@ app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    _REQUIRED_DB_VARS = ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"]
+    missing = [v for v in _REQUIRED_DB_VARS if not os.getenv(v)]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {missing}")
+
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key or openai_key == "placeholder":
+        logger.warning("OPENAI_API_KEY is not configured — agent endpoints will be unavailable")
+
     init_db()
     routes = [r.path for r in app.routes]
     logger.info("Application startup complete", extra={"routes_registered": len(routes)})
@@ -228,6 +246,18 @@ def health() -> dict:
         "chromadb": "up" if chroma_ok else "down",
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+# ─── Tasks ────────────────────────────────────────────────────────────────────
+
+@app.get("/task/{task_id}", tags=["Tasks"])
+def get_task_status(task_id: str) -> dict:
+    """Poll the status of a background task by its task_id."""
+    from src.api.task_store import get_task
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
 
 
 # ─── Affiliates ───────────────────────────────────────────────────────────────

@@ -18,6 +18,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
+from openai import APITimeoutError, RateLimitError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 load_dotenv()
 
@@ -25,8 +32,11 @@ from src.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "placeholder")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+_UNAVAILABLE_MSG = (
+    "The AI service is temporarily unavailable. Please try again in a moment."
+)
 
 SYSTEM_PROMPT = (
     "You are an AI assistant for our affiliate agency. "
@@ -61,11 +71,27 @@ SYSTEM_PROMPT = (
 )
 
 
+# ─── Retry-wrapped invocation ─────────────────────────────────────────────────
+
+@retry(
+    retry=retry_if_exception_type((RateLimitError, APITimeoutError)),
+    wait=wait_exponential(min=1, max=10),
+    stop=stop_after_attempt(3),
+)
+def _invoke_agent(agent, messages: list) -> dict:
+    """Invoke the LangGraph agent with exponential-backoff retry on rate-limit/timeout."""
+    return agent.invoke(
+        {"messages": messages},
+        config={"recursion_limit": 12},
+    )
+
+
 # ─── Agent initialisation ─────────────────────────────────────────────────────
 
 def _build_agent():
-    """Build the compiled LangGraph agent. Called once at module level."""
-    if not OPENAI_API_KEY or OPENAI_API_KEY == "placeholder":
+    """Build the compiled LangGraph agent. Called on demand."""
+    api_key = os.getenv("OPENAI_API_KEY", "placeholder")
+    if not api_key or api_key == "placeholder":
         raise RuntimeError(
             "OpenAI API key not configured. Add your key to .env file."
         )
@@ -87,21 +113,33 @@ def _build_agent():
     return agent
 
 
-# Module-level singleton — lazy-initialised so startup doesn't fail
-# when OPENAI_API_KEY is not configured.
-# Reset both fields whenever the system prompt changes.
+# Module-level singleton.
+# _agent_key tracks the OPENAI_API_KEY value at the time of the last build or
+# failure, so that a key change between requests forces a fresh initialisation
+# rather than returning the cached error.
 _agent = None
 _init_error: Optional[str] = None
+_agent_key: Optional[str] = None
 
 
 def _get_agent():
-    global _agent, _init_error
+    global _agent, _init_error, _agent_key
+    current_key = os.getenv("OPENAI_API_KEY", "")
+
+    # Key changed since last build/failure — reset and retry
+    if current_key != _agent_key:
+        _agent = None
+        _init_error = None
+
     if _agent is None and _init_error is None:
         try:
             _agent = _build_agent()
+            _agent_key = current_key
         except Exception as exc:
             _init_error = str(exc)
+            _agent_key = current_key
             logger.error("Agent initialisation failed", extra={"error": _init_error})
+
     if _init_error:
         raise RuntimeError(_init_error)
     return _agent
@@ -146,29 +184,31 @@ def run_agent(
                 messages.append(AIMessage(content=content))
     messages.append(HumanMessage(content=user_message))
 
-    result = agent.invoke(
-        {"messages": messages},
-        config={"recursion_limit": 12},  # ~6 tool-call iterations
-    )
+    try:
+        result = _invoke_agent(agent, messages)
+    except Exception as exc:
+        logger.error("Agent invoke failed after retries", extra={"error": str(exc)})
+        return {
+            "response": _UNAVAILABLE_MSG,
+            "tools_used": [],
+            "intermediate_steps": [],
+        }
 
     # Extract the final text response
     output_msgs = result.get("messages", [])
     response = ""
     for msg in reversed(output_msgs):
         if hasattr(msg, "content") and isinstance(msg.content, str) and msg.content.strip():
-            # Skip tool messages
             if not hasattr(msg, "tool_call_id"):
                 response = msg.content
                 break
 
     # Collect tool calls from AI messages
     tools_used: list[str] = []
-    simplified: list[dict] = []
     for msg in output_msgs:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
-                name = tc.get("name", str(tc))
-                tools_used.append(name)
+                tools_used.append(tc.get("name", str(tc)))
 
     # Pair tool calls with their results
     tool_results: dict[str, str] = {}
@@ -176,6 +216,7 @@ def run_agent(
         if hasattr(msg, "tool_call_id") and hasattr(msg, "content"):
             tool_results[msg.tool_call_id] = str(msg.content)[:300]
 
+    simplified: list[dict] = []
     for msg in output_msgs:
         if hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
@@ -192,6 +233,17 @@ def run_agent(
         "response": response or "No response generated.",
         "tools_used": unique_tools,
         "intermediate_steps": simplified,
+    }
+
+
+def get_agent_status() -> dict:
+    """Return current agent status without making any API call."""
+    key = os.getenv("OPENAI_API_KEY", "")
+    return {
+        "agent_ready": _agent is not None,
+        "openai_key_configured": bool(key) and key != "placeholder",
+        "model": OPENAI_MODEL,
+        "last_error": _init_error,
     }
 
 

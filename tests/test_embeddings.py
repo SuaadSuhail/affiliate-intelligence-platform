@@ -208,5 +208,5 @@ def test_search_endpoint_returns_results():
     assert isinstance(data, list)
     assert len(data) == 1
     assert data[0]["id"] == "abc_chunk_0"
-    assert "text" in data[0]
+    assert "document" in data[0]
     assert "distance" in data[0]

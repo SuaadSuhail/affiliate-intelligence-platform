@@ -242,28 +242,49 @@ via `app.include_router(...)`. Startup logs the total registered route count.
 | Method | Path | Router file | Description |
 |---|---|---|---|
 | GET | `/health` | main.py | Service health check (PostgreSQL + ChromaDB) |
+| GET | `/task/{task_id}` | main.py | Poll status of a background task |
 | GET | `/affiliates` | main.py | List affiliates with filtering + sorting |
 | GET | `/affiliates/{id}` | main.py | Single affiliate with score history |
 | GET | `/affiliates/{id}/communications` | main.py | Paginated communications |
 | POST | `/affiliates/{id}/score` | main.py | Trigger re-scoring for one affiliate |
 | POST | `/agent/chat` | main.py | Chat with the LangChain ReAct agent |
-| POST | `/ingest/full` | routers/ingest.py | Run full ETL from mock data files |
+| POST | `/ingest/full` | routers/ingest.py | Start ETL in background; returns task_id |
 | POST | `/ingest/affiliates` | routers/ingest.py | Re-ingest affiliates CSV only |
 | POST | `/ingest/communications` | routers/ingest.py | Re-ingest emails + transcripts |
 | POST | `/ingest/csv` | routers/ingest.py | Upload affiliates CSV file |
 | POST | `/process/nlp` | routers/process.py | Tag all untagged communications |
 | POST | `/process/embeddings` | routers/process.py | Embed all unembedded communications |
-| POST | `/process/full` | routers/process.py | NLP + embeddings end-to-end |
+| POST | `/process/full` | routers/process.py | Start NLP + embeddings in background; returns task_id |
 | GET | `/communications` | routers/search.py | List all communications with tags |
 | GET | `/communications/{id}` | routers/search.py | Single communication by UUID |
 | GET | `/search` | routers/search.py | Semantic search; params: `q`, `affiliate_id`, `n` |
-| POST | `/ml/train` | routers/ml.py | Train churn + growth XGBoost models |
-| POST | `/ml/score` | routers/ml.py | Score all affiliates and persist results |
+| POST | `/ml/train` | routers/ml.py | Start model training in background; returns task_id |
+| POST | `/ml/score` | routers/ml.py | Start affiliate scoring in background; returns task_id |
 | GET | `/ml/scores` | routers/ml.py | List current affiliate scores |
 | GET | `/ml/explain/{id}` | routers/ml.py | SHAP feature importances for one affiliate |
 | GET | `/ml/dashboard` | routers/ml.py | Aggregate health stats across all affiliates |
 
-**Total: 21 routes**
+**Total: 22 routes** (added `GET /task/{task_id}`)
+
+### Background task pattern
+
+`POST /ml/train`, `POST /ml/score`, `POST /process/full`, and `POST /ingest/full`
+are now **non-blocking** and return immediately:
+
+```json
+{"status": "accepted", "task_id": "uuid", "message": "...Poll GET /task/{task_id}..."}
+```
+
+Task lifecycle: `pending → running → complete | failed`
+
+State is held in `src/api/task_store.py` (in-memory dict; resets on process restart).
+Each background function creates its own `SessionLocal()` — it never shares the
+HTTP request's DB session (which is closed before the task runs).
+
+Poll response schema:
+```json
+{"task_id": "...", "status": "complete", "result": {...}, "error": null}
+```
 
 ---
 
@@ -641,7 +662,7 @@ These files had stale imports and old schema field names that caused runtime fai
 | `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
 | `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
 
-**API endpoints:** `POST /agent/chat` (with history), `POST /agent/quick` (single-turn), `GET /agent/demo`
+**API endpoints:** `POST /agent/chat` (with history), `POST /agent/quick` (single-turn), `GET /agent/demo`, `GET /agent/health`
 
 **Important implementation notes:**
 - All tools create a fresh `SessionLocal()` per call (not shared) and close it in `finally`
@@ -649,7 +670,14 @@ These files had stale imports and old schema field names that caused runtime fai
   XGBoost via joblib inside a LangGraph tool context causes a segfault in uvicorn)
 - `CHROMA_MODEL_PATH` in `.env` overrides the default path — ensure models are retrained
   if `.env` changes the path or after switching branches
-- Agent singleton is lazy — `_init_error` is set on first failure and returned on every call
+- Agent singleton tracks `_agent_key` (the OPENAI_API_KEY active at build time); if the key
+  changes between requests, the singleton resets and rebuilds — errors never cache permanently
+- `_invoke_agent()` wraps the LangGraph `agent.invoke()` call with tenacity retry:
+  `RateLimitError` and `APITimeoutError` trigger exponential backoff (1s→10s), up to 3 attempts;
+  on final failure returns `_UNAVAILABLE_MSG` instead of raising
+- `draft_email` LLM is instantiated with `timeout=30` to prevent indefinite hangs
+- `GET /agent/health` returns `{agent_ready, openai_key_configured, model, last_error}` with no
+  API call — useful for readiness checks without spending tokens
 - Demo endpoint (`GET /agent/demo`) runs 3 questions sequentially; requires models trained first
 
 **Depends on:** All pipeline steps must have run: `/ingest/full` → `/process/nlp` →
@@ -685,6 +713,7 @@ These files had stale imports and old schema field names that caused runtime fai
 - Main.py `AffiliateOut` updated to new schema (`status`, `revenue_30d`, `days_since_contact` — no `email`/`tier`/`company`)
 - `ScoreHistoryOut` updated (no `shap_values`/`model_version` in new schema)
 - `list_affiliates` filter updated (no `tier`/`niche` filter, use `status` instead)
+- `POST /agent/chat` fetch includes `X-Api-Key: change-me-in-production` header (required after auth hardening); `/ml/dashboard` and `/affiliates` are GET routes and remain headerless
 
 ---
 
@@ -705,6 +734,35 @@ Full end-to-end pipeline tested and working on `develop` branch:
 ---
 
 ## 13. Production Hardening
+
+### Week 1 — Complete
+
+- Structured JSON logging via `src/core/logging_config.py`
+- API key authentication on all write endpoints via `src/api/auth.py`
+- CORS restricted to `ALLOWED_ORIGINS` env var
+- SQL injection hardening on `query_database` tool
+- Startup validation for required env vars
+- OpenAI retry logic with exponential backoff via tenacity (3 attempts, 1–10s backoff)
+- 30-second timeout on `draft_email` LLM call
+- `GET /agent/health` endpoint
+- Background tasks for long-running operations: `POST /ml/train`, `/ml/score`, `POST /process/full`, `/ingest/full`
+- Task status polling via `GET /task/{task_id}`
+- Frontend pipeline buttons with live polling
+- Model fixed to `gpt-4o-mini` via env var
+
+### Week 2 — Planned
+
+- Alembic database migrations
+- S3 model storage and versioning
+- Switch ChromaDB to pgvector on PostgreSQL
+
+### Week 3-4 — Planned
+
+- AWS deployment (EC2 then ECS Fargate)
+- CloudWatch structured logging
+- RDS PostgreSQL with automated backups
+
+---
 
 ### Structured JSON logging
 
@@ -763,3 +821,124 @@ Logs every HTTP request with method, path, status code, and duration in millisec
 ```
 
 **Environment variable:** `LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` (default: `INFO`)
+
+---
+
+### API security hardening
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/api/auth.py` (new), `src/api/main.py`, `src/api/routers/*.py`, `src/agent/tools.py` |
+
+**What was added:**
+
+#### 1. CORS — env-driven origin allowlist
+
+`src/api/main.py` reads `ALLOWED_ORIGINS` from the environment (comma-separated) instead of using `allow_origins=["*"]`.
+
+- Default (dev): `http://localhost:8080,http://localhost:3000`
+- `allow_methods` narrowed from `["*"]` to `["GET", "POST"]`
+- `.env.example` has `ALLOWED_ORIGINS=http://localhost:8080,http://localhost:3000`
+
+#### 2. API key authentication
+
+`src/api/auth.py` — FastAPI `Depends()` dependency:
+
+- Reads `X-API-Key` header; compares to `API_SECRET_KEY` env var
+- Returns HTTP 401 if header is missing or wrong
+- Returns HTTP 500 if `API_SECRET_KEY` is not set in production
+- **Bypassed when `APP_ENV=development`** (default for local dev via uvicorn)
+
+**Protected routes (require X-API-Key in production):**
+
+| Router | Routes protected |
+|---|---|
+| `ingest.py` | All 4 POST routes (router-level dependency) |
+| `process.py` | All 3 POST routes (router-level dependency) |
+| `ml.py` | `POST /ml/train`, `POST /ml/score` |
+| `agent.py` | `POST /agent/chat`, `POST /agent/quick` |
+
+**Unprotected routes** (no auth needed): all GET routes, `GET /agent/demo`, `GET /health`
+
+#### 3. SQL injection hardening
+
+`src/agent/tools.py` — `query_database` tool now blocks dangerous SQL keywords in addition to the existing SELECT-only check:
+
+- Pattern: `\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|EXEC|EXECUTE)\b` (word-boundary, case-insensitive)
+- Returns a safe error string (not an exception) so the agent can handle it gracefully
+- Logs a `logger.warning()` with the blocked keyword and truncated query
+
+#### 4. Startup validation
+
+`src/api/main.py` `startup_event()` now validates env vars before initialising the DB:
+
+- Missing `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` → raises `RuntimeError` (app refuses to start)
+- `OPENAI_API_KEY` missing or `"placeholder"` → `logger.warning()` (non-fatal; agent endpoints will fail at call time)
+
+#### 5. docker-compose.yml updates
+
+- `CHROMA_PORT=8001` → `CHROMA_PORT=8000` (container-to-container uses internal port)
+- Added to app environment: `APP_ENV`, `API_SECRET_KEY`, `ALLOWED_ORIGINS`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- Docker default: `APP_ENV=production` (auth enforced); override with `APP_ENV=development` to skip auth
+
+**Test auth locally (with Docker running):**
+```bash
+# Should return 401 (auth required in production mode)
+curl -X POST http://localhost:8080/ingest/full
+
+# Should return 200 (correct key)
+curl -X POST http://localhost:8080/ingest/full \
+  -H "X-Api-Key: change-me-in-production"
+
+# Health check still open (no auth)
+curl http://localhost:8080/health
+```
+
+---
+
+### OpenAI reliability
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/agent/agent.py`, `src/agent/tools.py` |
+
+**What was added:**
+
+- **tenacity retry** on `_invoke_agent()`: `RateLimitError` and `APITimeoutError` trigger exponential backoff (1s–10s), up to 3 attempts; final failure returns `_UNAVAILABLE_MSG` instead of raising
+- **`_agent_key` tracking**: singleton resets and rebuilds automatically if `OPENAI_API_KEY` changes between requests — errors never cache permanently
+- **30-second timeout** on the `draft_email` `ChatOpenAI` instance (`timeout=30`)
+- **`GET /agent/health`** returns `{agent_ready, openai_key_configured, model, last_error}` with no API call — safe for readiness probes
+- **Model fixed to `gpt-4o-mini`**: both agent and tools use `gpt-4o-mini`; `OPENAI_MODEL` env var removed from `.env.example` to prevent accidental override
+
+---
+
+### Background tasks
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/production-hardening` branch |
+| **Files** | `src/api/task_store.py` (new), `src/api/routers/ml.py`, `src/api/routers/process.py`, `src/api/routers/ingest.py`, `src/api/main.py`, `src/api/templates/index.html` |
+
+**What was added:**
+
+`POST /ml/train`, `POST /ml/score`, `POST /process/full`, and `POST /ingest/full` all returned from blocking HTTP worker threads. Moved to FastAPI `BackgroundTasks` so they return immediately with a `task_id`.
+
+**`src/api/task_store.py`** — 25-line in-memory store:
+- `set_task(task_id, status, result, error)` — sets task state
+- `get_task(task_id)` — retrieves task by id
+- Resets on process restart (acceptable for demo/dev)
+
+**`GET /task/{task_id}`** — added to `main.py`; returns `{task_id, status, result, error}` or 404.
+
+**Background task pattern** — each task function:
+1. Is named `_run_<operation>_task(task_id: str)`
+2. Calls `set_task(task_id, "running")` at start
+3. Creates its own `db = SessionLocal()` (never shares the HTTP request session, which closes before the task runs)
+4. Calls `set_task(task_id, "complete", result=...)` on success or `set_task(task_id, "failed", error=...)` on failure
+5. Closes `db` in `finally`
+
+**Frontend pipeline buttons** — left panel now shows 4 pipeline control buttons (Ingest, Process, Train, Score). On click: sends POST, receives `task_id`, polls `GET /task/{task_id}` every 2 seconds, shows ⏳/✓/✗ status, and calls `loadData()` on completion to refresh the affiliate list.
+
+**Task lifecycle:** `pending → running → complete | failed`

@@ -3,8 +3,8 @@ ML Router
 =========
 Endpoints for training models, running scoring, and explaining predictions.
 
-POST /ml/train                  — train churn + growth XGBoost models
-POST /ml/score                  — score all affiliates and persist results
+POST /ml/train                  — start model training in background
+POST /ml/score                  — start affiliate scoring in background
 GET  /ml/scores                 — list current affiliate scores (worst first)
 GET  /ml/explain/{affiliate_id} — SHAP feature importance for one affiliate
 GET  /ml/dashboard              — portfolio health summary + full scores list
@@ -14,30 +14,28 @@ from __future__ import annotations
 
 import uuid as _uuid
 from typing import Optional
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from src.storage.database import get_db, db_session
+from src.api.auth import get_api_key
+from src.api.task_store import set_task
+from src.core.logging_config import get_logger
+from src.storage.database import SessionLocal, get_db
 from src.storage.models import Affiliate, ScoreHistory
 
+logger = get_logger(__name__)
 router = APIRouter()
 
 
 # ─── Pydantic schemas ─────────────────────────────────────────────────────────
 
-class TrainResult(BaseModel):
-    churn_model: str
-    growth_model: str
-    samples_used: int
-
-
-class ScoreResult(BaseModel):
-    affiliates_scored: int
-    avg_health_score: float
-    at_risk_count: int
-    high_growth_count: int
+class TaskAccepted(BaseModel):
+    status: str
+    task_id: str
+    message: str
 
 
 class AffiliateScore(BaseModel):
@@ -79,58 +77,100 @@ class DashboardStats(BaseModel):
     scores: list[AffiliateScore]
 
 
+# ─── Background task functions ────────────────────────────────────────────────
+
+def _run_training_task(task_id: str) -> None:
+    """Train both XGBoost models in a background thread."""
+    set_task(task_id, "running")
+    logger.info("Training task started", extra={"task_id": task_id})
+    db = SessionLocal()
+    try:
+        from src.ml.feature_engineering import get_feature_dataframe
+        from src.ml.churn_model import train_churn_model
+        from src.ml.growth_model import train_growth_model
+
+        df = get_feature_dataframe(db)
+        if df.empty:
+            set_task(task_id, "failed", error="No affiliate data found. Run /ingest/full first.")
+            return
+
+        n = len(df)
+        try:
+            train_churn_model(df)
+            churn_status = "trained"
+        except Exception as exc:
+            churn_status = f"error: {exc}"
+
+        try:
+            train_growth_model(df)
+            growth_status = "trained"
+        except Exception as exc:
+            growth_status = f"error: {exc}"
+
+        result = {"churn_model": churn_status, "growth_model": growth_status, "samples_used": n}
+        set_task(task_id, "complete", result=result)
+        logger.info("Training task complete", extra={"task_id": task_id, **result})
+    except Exception as exc:
+        logger.error("Training task failed", extra={"task_id": task_id, "error": str(exc)})
+        set_task(task_id, "failed", error=str(exc))
+    finally:
+        db.close()
+
+
+def _run_scoring_task(task_id: str) -> None:
+    """Score all affiliates in a background thread."""
+    set_task(task_id, "running")
+    logger.info("Scoring task started", extra={"task_id": task_id})
+    db = SessionLocal()
+    try:
+        from src.ml.score_updater import update_all_scores
+
+        result = update_all_scores(db)
+        db.commit()
+        set_task(task_id, "complete", result=result)
+        logger.info("Scoring task complete", extra={"task_id": task_id})
+    except Exception as exc:
+        db.rollback()
+        logger.error("Scoring task failed", extra={"task_id": task_id, "error": str(exc)})
+        set_task(task_id, "failed", error=str(exc))
+    finally:
+        db.close()
+
+
 # ─── Train ────────────────────────────────────────────────────────────────────
 
-@router.post("/train", response_model=TrainResult)
-def train_models(db: Session = Depends(get_db)) -> TrainResult:
+@router.post("/train", response_model=TaskAccepted, dependencies=[Depends(get_api_key)])
+async def train_models(background_tasks: BackgroundTasks) -> TaskAccepted:
     """
-    Train both XGBoost models (churn + growth) on current affiliate data.
-    Saves artefacts to models/churn_model.pkl and models/growth_model.pkl.
+    Start training churn + growth XGBoost models in the background.
+    Returns immediately with a task_id. Poll GET /task/{task_id} for status.
     """
-    from src.ml.feature_engineering import get_feature_dataframe
-    from src.ml.churn_model import train_churn_model
-    from src.ml.growth_model import train_growth_model
-
-    df = get_feature_dataframe(db)
-    if df.empty:
-        raise HTTPException(status_code=400, detail="No affiliate data found. Run /ingest/full first.")
-
-    n = len(df)
-
-    try:
-        train_churn_model(df)
-        churn_status = "trained"
-    except Exception as exc:
-        churn_status = f"error: {exc}"
-
-    try:
-        train_growth_model(df)
-        growth_status = "trained"
-    except Exception as exc:
-        growth_status = f"error: {exc}"
-
-    return TrainResult(churn_model=churn_status, growth_model=growth_status, samples_used=n)
+    task_id = str(uuid4())
+    set_task(task_id, "pending")
+    background_tasks.add_task(_run_training_task, task_id)
+    return TaskAccepted(
+        status="accepted",
+        task_id=task_id,
+        message=f"Training started in background. Poll GET /task/{task_id} for status.",
+    )
 
 
 # ─── Score ────────────────────────────────────────────────────────────────────
 
-@router.post("/score", response_model=ScoreResult)
-def score_all_affiliates(db: Session = Depends(get_db)) -> ScoreResult:
+@router.post("/score", response_model=TaskAccepted, dependencies=[Depends(get_api_key)])
+async def score_all_affiliates(background_tasks: BackgroundTasks) -> TaskAccepted:
     """
-    Score all affiliates using rule-based or XGBoost model (whichever is available).
-    Updates churn_risk_score, growth_potential_score, health_score in PostgreSQL
-    and appends to score_history. Skips affiliates already scored today.
+    Score all affiliates in the background.
+    Returns immediately with a task_id. Poll GET /task/{task_id} for status.
     """
-    from src.ml.score_updater import update_all_scores
-
-    try:
-        result = update_all_scores(db)
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Scoring error: {exc}")
-
-    return ScoreResult(**result)
+    task_id = str(uuid4())
+    set_task(task_id, "pending")
+    background_tasks.add_task(_run_scoring_task, task_id)
+    return TaskAccepted(
+        status="accepted",
+        task_id=task_id,
+        message=f"Scoring started in background. Poll GET /task/{task_id} for status.",
+    )
 
 
 # ─── Scores list ──────────────────────────────────────────────────────────────
@@ -140,9 +180,7 @@ def get_scores(
     limit: int = 50,
     db: Session = Depends(get_db),
 ) -> list[AffiliateScore]:
-    """
-    Return affiliate scores sorted by health_score ascending — worst affiliates first.
-    """
+    """Return affiliate scores sorted by health_score ascending — worst affiliates first."""
     affiliates = (
         db.query(Affiliate)
         .order_by(Affiliate.health_score.asc())
@@ -182,7 +220,6 @@ def explain(affiliate_id: str, db: Session = Depends(get_db)) -> ExplainResult:
     from src.ml.explainability import get_shap_explanation
 
     features = build_feature_vector(affiliate_id, db)
-
     churn_exp = get_shap_explanation(affiliate_id, features, "churn")
     growth_exp = get_shap_explanation(affiliate_id, features, "growth")
 
@@ -208,10 +245,7 @@ def explain(affiliate_id: str, db: Session = Depends(get_db)) -> ExplainResult:
 
 @router.get("/dashboard", response_model=DashboardStats)
 def dashboard(db: Session = Depends(get_db)) -> DashboardStats:
-    """
-    Portfolio health summary with full scores list.
-    Shows at_risk, high_growth, and churned affiliate counts.
-    """
+    """Portfolio health summary with full scores list."""
     affiliates = db.query(Affiliate).order_by(Affiliate.health_score.asc()).all()
 
     if not affiliates:

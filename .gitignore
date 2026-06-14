@@ -19,6 +19,7 @@ env/
 chroma_db/
 models/*.pkl
 models/*.joblib
+models/*.json
 data/processed/
 
 # OS
@@ -27,6 +28,9 @@ Thumbs.db
 
 # VS Code
 .vscode/settings.json
+
+# Alembic
+alembic/versions/__pycache__/
 
 # Logs
 *.log

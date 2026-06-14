@@ -50,12 +50,13 @@ def run_embeddings(db: Session = Depends(get_db)) -> dict:
     Generate embeddings for all communications that have no embedding_id yet.
 
     Delegates to embed_all_communications() which chunks each communication's
-    raw_text, encodes with all-MiniLM-L6-v2, stores in ChromaDB, and writes
-    the first chunk doc_id to communications.embedding_id.
+    raw_text, encodes with all-MiniLM-L6-v2, and stores vectors in pgvector.
     """
-    from src.ingestion.embedding_generator import embed_all_communications, vector_store
+    from src.ingestion.embedding_generator import embed_all_communications
+    from src.storage.pgvector_store import PGVectorStore
 
-    result = embed_all_communications(db, vector_store)
+    vs = PGVectorStore(db)
+    result = embed_all_communications(db, vs)
     db.commit()
     return result
 
@@ -69,7 +70,8 @@ def _run_process_full_task(task_id: str) -> None:
     db = SessionLocal()
     try:
         from src.ingestion.nlp_processor import process_all_communications
-        from src.ingestion.embedding_generator import embed_all_communications, vector_store
+        from src.ingestion.embedding_generator import embed_all_communications
+        from src.storage.pgvector_store import PGVectorStore
 
         etl_result: dict = {"status": "skipped"}
         try:
@@ -83,7 +85,8 @@ def _run_process_full_task(task_id: str) -> None:
         nlp_result = process_all_communications(db)
         db.commit()
 
-        emb_result = embed_all_communications(db, vector_store)
+        vs = PGVectorStore(db)
+        emb_result = embed_all_communications(db, vs)
         db.commit()
 
         result = {"etl": etl_result, "nlp": nlp_result, "embeddings": emb_result}

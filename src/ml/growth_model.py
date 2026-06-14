@@ -6,25 +6,23 @@ Predicts growth_potential_score (0.0–1.0) for each affiliate.
 Primary: rule-based scorer (always available)
 Secondary: XGBoost classifier (used when model artefact exists)
 
-Artefact saved to: models/growth_model.pkl
+Artefact saved via model_store (local disk + optional S3).
 """
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Optional
 
-import joblib
 import pandas as pd
 from xgboost import XGBClassifier
 
 from src.core.logging_config import get_logger
 from src.ml.feature_engineering import FEATURE_NAMES
+from src.ml.model_store import load_model, save_model
 
 logger = get_logger(__name__)
 
-GROWTH_MODEL_PATH = Path(os.getenv("GROWTH_MODEL_PATH", "models/growth_model.pkl"))
+_GROWTH_FILENAME = "growth_model.pkl"
 
 _XGBOOST_PARAMS = {
     "n_estimators": 50,
@@ -122,9 +120,7 @@ def train_growth_model(df: pd.DataFrame) -> XGBClassifier:
     model = XGBClassifier(**_XGBOOST_PARAMS)
     model.fit(X, y, verbose=False)
 
-    GROWTH_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, GROWTH_MODEL_PATH)
-    logger.info("Growth model saved", extra={"path": str(GROWTH_MODEL_PATH)})
+    save_model(model, _GROWTH_FILENAME)
 
     _model = model
     return model
@@ -133,11 +129,13 @@ def train_growth_model(df: pd.DataFrame) -> XGBClassifier:
 # ─── Inference ────────────────────────────────────────────────────────────────
 
 def _load_saved_model() -> Optional[XGBClassifier]:
+    """Load model from disk (or S3) if available."""
     global _model
     if _model is not None:
         return _model
-    if GROWTH_MODEL_PATH.exists():
-        _model = joblib.load(GROWTH_MODEL_PATH)
+    loaded = load_model(_GROWTH_FILENAME)
+    if loaded is not None:
+        _model = loaded
         return _model
     return None
 

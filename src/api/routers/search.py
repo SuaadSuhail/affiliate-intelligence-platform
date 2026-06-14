@@ -97,21 +97,24 @@ def search(
     q: str = Query(..., description="Natural-language search query"),
     affiliate_id: Optional[str] = Query(None, description="Filter to one affiliate UUID"),
     n: int = Query(5, ge=1, le=20, description="Number of results"),
+    db: Session = Depends(get_db),
 ) -> list[SearchResultItem]:
     """
     Semantic search over embedded communications.
 
     Uses sentence-transformers/all-MiniLM-L6-v2 to encode the query, then
-    returns the closest matching communication chunks from ChromaDB.
+    returns the closest matching communication chunks from pgvector.
     """
-    from src.ingestion.embedding_generator import model, vector_store
+    from src.ingestion.embedding_generator import model
+    from src.storage.pgvector_store import PGVectorStore
 
     query_embedding = model.encode(q).tolist()
     try:
-        results = vector_store.search_similar(
+        vs = PGVectorStore(db)
+        results = vs.search_similar(
             query_embedding=query_embedding,
             n_results=n,
-            affiliate_id=affiliate_id,
+            filter_affiliate_id=affiliate_id,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Search error: {exc}")
@@ -119,8 +122,13 @@ def search(
     return [
         SearchResultItem(
             id=r.get("id", ""),
-            document=r.get("text", r.get("document", "")),
-            metadata=r.get("metadata", {}),
+            document=r.get("text", ""),
+            metadata={
+                "affiliate_name": r.get("affiliate_name", ""),
+                "source": r.get("source", ""),
+                "tags": r.get("tags", []),
+                "occurred_at": r.get("occurred_at", ""),
+            },
             distance=r.get("distance", 0.0),
         )
         for r in results

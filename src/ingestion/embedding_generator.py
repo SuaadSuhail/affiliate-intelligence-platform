@@ -2,18 +2,18 @@
 Embedding Generator
 ===================
 Converts communication text to 384-dim vectors using
-sentence-transformers/all-MiniLM-L6-v2 and stores them in ChromaDB
-with full metadata.  Only records where embedding_id IS NULL are processed,
+sentence-transformers/all-MiniLM-L6-v2 and stores them in PostgreSQL
+via pgvector.  Only records where embedding_id IS NULL are processed,
 making the pipeline safe to re-run at any time.
 
 Usage
 -----
     from src.ingestion.embedding_generator import embed_all_communications
     from src.storage.database import db_session
-    from src.storage.vector_store import vector_store
+    from src.storage.pgvector_store import PGVectorStore
 
     with db_session() as db:
-        result = embed_all_communications(db, vector_store)
+        result = embed_all_communications(db, PGVectorStore(db))
         print(result)
 """
 
@@ -33,7 +33,7 @@ except ImportError as exc:
 
 from src.core.logging_config import get_logger
 from src.storage.models import Affiliate, Communication
-from src.storage.vector_store import VectorStore, vector_store
+from src.storage.pgvector_store import PGVectorStore
 
 logger = get_logger(__name__)
 
@@ -86,23 +86,23 @@ def chunk_text(
 def embed_communication(
     comm: Communication,
     db: Session,
-    vs: VectorStore,
+    vs: PGVectorStore,
 ) -> dict:
     """
-    Embed a single communication record and store all chunks in ChromaDB.
+    Embed a single communication record and store all chunks via pgvector.
 
     Steps
     -----
     1. Look up the affiliate name from PostgreSQL
     2. Chunk the raw_text
-    3. Encode each chunk and upsert to ChromaDB via vs.add_document()
+    3. Encode each chunk and upsert to pgvector via vs.add_document()
     4. Write the first chunk's doc_id back to comm.embedding_id
 
     Parameters
     ----------
     comm : Communication ORM instance (must be in the current db session)
     db   : active SQLAlchemy session
-    vs   : VectorStore instance
+    vs   : PGVectorStore instance
 
     Returns
     -------
@@ -125,12 +125,12 @@ def embed_communication(
         vs.add_document(
             doc_id=doc_id,
             text=chunk,
-            embedding=embedding,
             affiliate_id=str(comm.affiliate_id),
             affiliate_name=affiliate_name,
-            source=comm.source,
+            source=str(comm.source),
             tags=comm.tags or [],
-            occurred_at=str(comm.occurred_at),
+            occurred_at=comm.occurred_at,
+            embedding_vector=embedding,
         )
         if i == 0:
             first_doc_id = doc_id
@@ -147,7 +147,7 @@ def embed_communication(
 
 def embed_all_communications(
     db: Session,
-    vs: VectorStore,
+    vs: PGVectorStore,
 ) -> dict:
     """
     Embed every communication that has no embedding_id yet.

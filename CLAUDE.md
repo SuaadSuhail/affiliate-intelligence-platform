@@ -147,35 +147,43 @@ CREATE TABLE score_history (
 
 ---
 
-## 4. ChromaDB Collection Structure
+## 4. pgvector Embedding Store
 
-### 4.1 `communications_embeddings`
+**ChromaDB has been replaced by pgvector.** All embeddings are stored in the same PostgreSQL
+instance used for structured data — no separate container required.
 
-Stores one document per communication.
+### 4.1 `embeddings` table
 
-| Field | Value |
+One row per communication chunk (200-word overlapping segments).
+
+```sql
+CREATE TABLE embeddings (
+    id TEXT PRIMARY KEY,                    -- "{comm_uuid}_chunk_{i}"
+    affiliate_id UUID REFERENCES affiliates(id) ON DELETE CASCADE,
+    affiliate_name TEXT,
+    source TEXT,                            -- email | call | api_event
+    chunk_text TEXT,
+    tags TEXT[],
+    occurred_at TIMESTAMPTZ,
+    embedding vector(384)                   -- all-MiniLM-L6-v2
+);
+CREATE INDEX embeddings_vector_idx ON embeddings
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
+CREATE INDEX embeddings_affiliate_id_idx ON embeddings (affiliate_id);
+```
+
+### 4.2 `PGVectorStore` class
+
+`src/storage/pgvector_store.py` — replaces `vector_store.py`:
+
+| Method | Description |
 |---|---|
-| **collection** | `communications_embeddings` |
-| **model** | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
-| **document** | Full `content` text |
-| **id** | `comm_{uuid}` |
-| **metadata** | `affiliate_id`, `channel`, `direction`, `sentiment_label`, `tags` (pipe-joined string), `occurred_at` (ISO) |
+| `add_document(doc_id, text, affiliate_id, ...)` | Upsert one chunk |
+| `search_similar(query_embedding, n_results, ...)` | Cosine distance search; returns `[{id, text, affiliate_name, source, tags, occurred_at, distance}]` |
+| `get_by_affiliate(affiliate_id, limit)` | All chunks for one affiliate |
+| `delete_by_affiliate(affiliate_id)` | Remove all chunks for one affiliate |
 
-Used for: semantic search over past communications, RAG context for agent.
-
-### 4.2 `affiliate_profiles`
-
-Stores one document per affiliate — a concatenated summary of their profile + recent comms.
-
-| Field | Value |
-|---|---|
-| **collection** | `affiliate_profiles` |
-| **model** | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
-| **document** | `f"{name} | {company} | {niche} | {traffic_source} | tier={tier} | revenue={monthly_revenue}"` |
-| **id** | `aff_{uuid}` |
-| **metadata** | `affiliate_id`, `tier`, `niche`, `churn_risk_score`, `growth_potential_score`, `health_score` |
-
-Used for: finding similar affiliates, clustering, agent profile lookups.
+**Usage:** Every caller creates `PGVectorStore(db)` with the current SQLAlchemy session — no singleton.
 
 ---
 
@@ -223,12 +231,11 @@ Derived: `sentiment_trend`, `response_rate`, `days_since_positive`
 
 | Tool | Function |
 |---|---|
-| `query_affiliates` | SQL query against PostgreSQL affiliates + score data |
-| `search_communications` | Semantic search over ChromaDB communications_embeddings |
-| `summarise_affiliate` | Generates a narrative health summary for one affiliate |
-| `draft_email` | Drafts a personalised outreach email for a given affiliate + goal |
-| `flag_risk` | Creates an urgent risk flag record for an affiliate |
-| `run_scoring` | Triggers re-scoring for one or all affiliates |
+| `query_database` | Raw SQL SELECT against PostgreSQL; validates SELECT-only, max 20 rows |
+| `semantic_search` | pgvector cosine search over communications via `PGVectorStore.search_similar()` |
+| `get_affiliate_summary` | Full affiliate profile: scores, recent comms, risk signals, recommended action |
+| `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
+| `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
 
 ---
 
@@ -319,39 +326,27 @@ curl http://localhost:8080/ml/dashboard              # verify pipeline state
 
 | Service | Image | Host port | Notes |
 |---|---|---|---|
-| `postgres` | `postgres:16-alpine` | `5432` | healthcheck: `pg_isready` |
-| `chromadb` | `chromadb/chroma:latest` | `8001` | container internal port 8000; **NO auth**; **NO healthcheck** |
-| `app` | custom build | `8080` | depends on postgres (healthy) + chromadb (started) |
+| `postgres` | `pgvector/pgvector:pg16` | `5432` | pgvector extension pre-installed; healthcheck: `pg_isready` |
+| `app` | custom build | `8080` | depends on postgres (healthy) only |
 
-**chromadb environment (only these two — do not add auth vars):**
-```
-IS_PERSISTENT=TRUE
-PERSIST_DIRECTORY=/chroma/chroma
-```
+> **ChromaDB container removed.** All vector storage runs inside PostgreSQL via the
+> `pgvector` extension. The `pgvector/pgvector:pg16` image is a drop-in replacement for
+> `postgres:16-alpine` with pgvector pre-installed — data format is identical.
 
-**app environment:**
+**app environment (no CHROMA_* vars):**
 ```
-CHROMA_HOST=chromadb
-CHROMA_PORT=8000    ← container-to-container port (NOT 8001 which is the Mac host port)
 DATABASE_URL=postgresql://...@postgres:5432/affiliate_intelligence
 OPENAI_API_KEY=...
+APP_ENV=production
+API_SECRET_KEY=...
 ```
-
-> **Docker networking:** `CHROMA_PORT=8000` inside Docker because container-to-container
-> traffic goes directly to ChromaDB's internal port. `8001` is the *host* port mapping
-> used only from the Mac terminal. `vector_store.py` connects to `http://chromadb:8000`
-> inside Docker, and `http://localhost:8001` from the Mac terminal.
 
 ### Known fixes — permanently committed to git
 
 The `docker-compose.yml` has all fixes applied. Do **not** re-add any of these:
 
-- **chromadb 1.5.9 does not support token auth** — `CHROMA_SERVER_AUTH_*` env vars
-  cause container startup failure; they have been removed.
-- **chromadb healthcheck removed** — the `/api/v1/heartbeat` path does not exist in
-  chromadb ≥ 1.0; `app` uses `service_started` instead of `service_healthy`.
-- **Port conflict resolved** — app on `8080`, chromadb on host port `8001` (container `8000`).
 - **`version:` attribute removed** — obsolete in Docker Compose v2; omit entirely.
+- **ChromaDB removed** — replaced by pgvector; do not re-add chromadb service or CHROMA_* env vars.
 - **ChromaDB `health_check()` uses `list_collections()`** — `client.heartbeat()` calls
   `/api/v1/heartbeat` which does not exist in ChromaDB ≥ 1.0, causing the `/health`
   endpoint to always report `"chromadb": "down"` even when the container is healthy.
@@ -376,7 +371,6 @@ Expected output from `docker compose ps`:
 ```
 NAME            STATUS          PORTS
 aip_postgres    Up (healthy)    0.0.0.0:5432->5432/tcp
-aip_chromadb    Up              0.0.0.0:8001->8000/tcp
 aip_app         Up              0.0.0.0:8080->8080/tcp
 ```
 
@@ -432,24 +426,20 @@ feat(agent): add draft_email tool to LangChain agent
 | | |
 |---|---|
 | **Status** | Complete |
-| **Files** | `src/storage/database.py`, `src/storage/models.py`, `src/storage/vector_store.py` |
+| **Files** | `src/storage/database.py`, `src/storage/models.py`, `src/storage/pgvector_store.py` |
 
 **What it does:**
 - `database.py` — creates the SQLAlchemy engine, `SessionLocal` factory, and FastAPI
   `get_db()` dependency; exposes `db_session()` context manager for scripts
-- `models.py` — ORM models for `Affiliate`, `Communication`, `ScoreHistory` that match
-  the live DB schema (see § 3); uses `ARRAY(String)` for `tags`, `Enum` types for
-  `status` / `source`
-- `vector_store.py` — thin ChromaDB wrapper; manages `communications_embeddings` and
-  `affiliate_profiles` collections with cosine similarity; lazy HTTP client connection
+- `models.py` — ORM models for `Affiliate`, `Communication`, `ScoreHistory`, and `Embedding`
+  (pgvector) that match the live DB schema (see §§ 3–4); uses `ARRAY(String)` for `tags`,
+  `Enum` types for `status` / `source`, `Vector(384)` for embeddings
+- `pgvector_store.py` — pgvector wrapper; `PGVectorStore(db)` is instantiated per-request
+  with the active SQLAlchemy session; replaces the old `vector_store.py` ChromaDB singleton
 
 **Key functions:** `get_db()`, `db_session()`, `init_db()`, `health_check()`,
-`VectorStore.upsert_communication()`, `VectorStore.search_communications()`,
-`VectorStore.upsert_affiliate_profile()`, `VectorStore.find_similar_affiliates()`
-
-**Infrastructure fix:** Removed `chromadb.auth.token.TokenAuthClientProvider` from
-`_get_client()` — that module does not exist in chromadb ≥ 1.0. Client now connects
-without auth settings.
+`PGVectorStore.add_document()`, `PGVectorStore.search_similar()`,
+`PGVectorStore.get_by_affiliate()`, `PGVectorStore.delete_by_affiliate()`
 
 ---
 
@@ -657,7 +647,7 @@ These files had stale imports and old schema field names that caused runtime fai
 | Tool | Description |
 |---|---|
 | `query_database` | Raw SQL SELECT against PostgreSQL; validates SELECT-only, max 20 rows |
-| `semantic_search` | ChromaDB embedding search over communications via `vector_store.search_similar()` |
+| `semantic_search` | pgvector cosine search over communications via `PGVectorStore(db).search_similar()` |
 | `get_affiliate_summary` | Full affiliate profile: scores, recent comms, risk signals, recommended action |
 | `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
 | `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
@@ -668,8 +658,6 @@ These files had stale imports and old schema field names that caused runtime fai
 - All tools create a fresh `SessionLocal()` per call (not shared) and close it in `finally`
 - `get_affiliate_summary` derives risk signals from communication tags — NOT from SHAP (loading
   XGBoost via joblib inside a LangGraph tool context causes a segfault in uvicorn)
-- `CHROMA_MODEL_PATH` in `.env` overrides the default path — ensure models are retrained
-  if `.env` changes the path or after switching branches
 - Agent singleton tracks `_agent_key` (the OPENAI_API_KEY active at build time); if the key
   changes between requests, the singleton resets and rebuilds — errors never cache permanently
 - `_invoke_agent()` wraps the LangGraph `agent.invoke()` call with tenacity retry:
@@ -719,17 +707,17 @@ These files had stale imports and old schema field names that caused runtime fai
 
 ### Current verified pipeline state
 
-Full end-to-end pipeline tested and working on `develop` branch:
+Full end-to-end pipeline tested and working on `feature/data-persistence` branch:
 
 | Step | Endpoint | Result |
 |---|---|---|
-| Ingest | `POST /ingest/full` | 10 affiliates + 7 communications loaded |
-| NLP | `POST /process/nlp` | 7/7 communications tagged |
-| Embeddings | `POST /process/embeddings` | 7 embedded, 13 chunks in ChromaDB |
-| Train | `POST /ml/train` | Both XGBoost models trained (10 samples) |
-| Score | `POST /ml/score` | 10 affiliates scored |
-| Dashboard | `GET /ml/dashboard` | `total_affiliates: 10`, `score_history_entries: 10` |
-| Routes | `GET /openapi.json` | All 21 routes registered |
+| Migrate | `POST /admin/migrate` | `revision: ccc1c19d5237` — pgvector extension + embeddings table |
+| Ingest | `POST /ingest/full` | 10 affiliates + 21 communications loaded |
+| NLP | `POST /process/nlp` | 21/21 communications tagged |
+| Embeddings | `POST /process/embeddings` | 21 embedded, 39 chunks in pgvector |
+| Search | `GET /search?q=...` | Cosine similarity results from PostgreSQL |
+| Agent | `POST /agent/quick` | Correctly identifies at-risk affiliates |
+| Tests | `pytest tests/ -v` | 24/24 passing |
 
 ---
 
@@ -750,17 +738,29 @@ Full end-to-end pipeline tested and working on `develop` branch:
 - Frontend pipeline buttons with live polling
 - Model fixed to `gpt-4o-mini` via env var
 
-### Week 2 — Planned
+### Week 2 — Complete
 
-- Alembic database migrations
-- S3 model storage and versioning
-- Switch ChromaDB to pgvector on PostgreSQL
+- Alembic database migrations ✓
+- S3 model storage and versioning ✓
+- pgvector replaces ChromaDB — single-database architecture ✓
 
-### Week 3-4 — Planned
+### Data persistence — Complete
 
-- AWS deployment (EC2 then ECS Fargate)
-- CloudWatch structured logging
+- Alembic migrations replacing `create_all()` — schema versioned and auditable
+- Manual migration via `POST /admin/migrate` — safe for multi-instance production
+- `GET /admin/migration-status` endpoint — shows current `alembic_version` revision
+- S3-compatible model storage with local fallback (`src/ml/model_store.py`)
+- pgvector replacing ChromaDB entirely — no separate vector database container
+- Single PostgreSQL database for all storage (structured data + vectors)
+- `embeddings` table with `vector(384)` column and `ivfflat` cosine index
+- 24/24 tests passing
+
+### Planned next
+
+- AWS/Railway deployment
+- CloudWatch or structured log aggregation
 - RDS PostgreSQL with automated backups
+- Rate limiting on public endpoints
 
 ---
 
@@ -942,3 +942,104 @@ curl http://localhost:8080/health
 **Frontend pipeline buttons** — left panel now shows 4 pipeline control buttons (Ingest, Process, Train, Score). On click: sends POST, receives `task_id`, polls `GET /task/{task_id}` every 2 seconds, shows ⏳/✓/✗ status, and calls `loadData()` on completion to refresh the affiliate list.
 
 **Task lifecycle:** `pending → running → complete | failed`
+
+---
+
+### Database migrations (Alembic) — production safe
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/data-persistence` branch |
+| **Files** | `alembic.ini`, `alembic/env.py`, `alembic/versions/13ea16583831_initial_schema_affiliates_.py`, `src/api/routers/admin.py` |
+
+**Design decision: migrations do NOT run on startup.**
+
+In production, multiple app instances start simultaneously behind a load balancer. If each instance runs `alembic upgrade head` on startup, they race to acquire schema locks on PostgreSQL, causing deadlocks and potential data corruption.
+
+**How it works:**
+- App startup runs `SELECT 1` only — verifies the database is reachable, nothing more
+- Migrations are triggered manually via `POST /admin/migrate` (requires API key)
+- `GET /admin/migration-status` returns the current revision from `alembic_version`
+- Migration files live in `alembic/versions/`
+
+**`src/api/routers/admin.py`** — two protected endpoints:
+- `POST /admin/migrate` — runs `alembic upgrade head`; returns `{status, message}` or `{status, error}`
+- `GET /admin/migration-status` — returns `{current_revision, status}` via `MigrationContext`
+
+**When to run migrations:**
+1. First-time setup: after `docker compose up -d`, call `POST /admin/migrate` once
+2. After schema changes: generate with `alembic revision --autogenerate -m "description"`, review the file, then call `POST /admin/migrate`
+3. Production deployment: deploy new app version first, wait for health, then call `POST /admin/migrate` once
+
+**CLI commands (direct access):**
+```bash
+alembic upgrade head    # apply all pending
+alembic downgrade -1    # rollback one migration
+alembic current         # show current version
+alembic history         # show all migrations
+```
+
+**Never:**
+- Run migrations on multiple instances simultaneously
+- Delete files from `alembic/versions/`
+- Skip reviewing autogenerated migration files
+- Run migrations before the app is healthy
+
+---
+
+### S3 model storage
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/data-persistence` branch |
+| **File** | `src/ml/model_store.py` (new) |
+
+**What was added:**
+
+- `src/ml/model_store.py` — thin abstraction over local disk + S3-compatible object storage:
+  - `save_model(model, filename)` — writes with joblib locally, then uploads to S3 if `USE_S3=true`
+  - `load_model(filename)` — returns from local disk; if missing and `USE_S3=true`, downloads from S3 first
+  - `model_exists(filename)` — checks local disk first, then S3 via `head_object`
+  - `_get_s3_client()` — creates a boto3 client; `S3_ENDPOINT_URL` makes it work with any S3-compatible platform (DigitalOcean Spaces, Cloudflare R2, Backblaze B2)
+- `USE_S3=false` by default — works locally with no cloud credentials required
+- `boto3` added to `requirements.txt`
+- `churn_model.py` and `growth_model.py` updated: `joblib.dump/load` calls replaced with `save_model` / `load_model`; `CHURN_MODEL_PATH` / `GROWTH_MODEL_PATH` env vars and direct `os`/`Path`/`joblib` imports removed
+- `models/*.json` added to `.gitignore`
+- `.env.example` extended with all S3 variables (`USE_S3`, `S3_BUCKET`, `S3_MODEL_PREFIX`, `S3_ENDPOINT_URL`, `AWS_*`)
+- README `Model storage` section added
+
+---
+
+### pgvector replaces ChromaDB — single-database architecture
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/data-persistence` branch |
+| **Files** | `src/storage/pgvector_store.py` (new), `src/storage/models.py`, `src/ingestion/embedding_generator.py`, `src/agent/tools.py`, `src/api/routers/search.py`, `src/api/routers/process.py`, `src/api/main.py`, `docker-compose.yml` |
+
+**What was changed:**
+
+- **ChromaDB container removed** from `docker-compose.yml`; PostgreSQL image switched from `postgres:16-alpine` to `pgvector/pgvector:pg16` (same PG16, adds the vector extension)
+- **New Alembic migration** (`ccc1c19d5237`): enables `CREATE EXTENSION IF NOT EXISTS vector`, creates `embeddings` table with `vector(384)` column, adds `ivfflat` cosine index with `lists=10`
+- **`Embedding` ORM model** added to `src/storage/models.py` — maps to the `embeddings` table using `pgvector.sqlalchemy.Vector(384)`
+- **`PGVectorStore` class** (`src/storage/pgvector_store.py`) replaces the ChromaDB `VectorStore` singleton:
+  - Receives a `db: Session` — no module-level singleton, no separate HTTP client
+  - `add_document(...)` upserts one chunk; `search_similar(query_embedding, n_results, ...)` returns `[{id, text, affiliate_name, source, tags, occurred_at, distance}]` using `Embedding.embedding.cosine_distance()`
+- **`embedding_generator.py`** updated: removed `chromadb`/`VectorStore` imports; `add_document()` call signature changed — `embedding` param renamed to `embedding_vector`; `occurred_at` passed as a datetime object (not a string)
+- **`tools.py` `semantic_search`** tool updated: creates `PGVectorStore(db)` inside the tool with its own `_get_db()` session; result format now flat (`affiliate_name`, `source`, `tags` at top level — no nested `metadata`)
+- **`search.py`** router updated: `GET /search` creates `PGVectorStore(db)` using FastAPI `get_db()` dependency; maps `text` → `document` and builds `metadata` dict for backward-compatible `SearchResultItem` response
+- **`process.py`** router updated: `POST /process/embeddings` and `_run_process_full_task` create `PGVectorStore(db)` instead of passing the old `vector_store` singleton
+- **`main.py`** health endpoint simplified: removed ChromaDB check; returns `{status, postgres, timestamp}` only
+- **`requirements.txt`**: `chromadb>=0.5.0` replaced with `pgvector>=0.3.0`
+- **`.env.example`**: `CHROMA_*` variables removed
+- **`src/ml/explainability.py`** bonus fix: `CHURN_MODEL_PATH` / `GROWTH_MODEL_PATH` imports replaced with `model_store.load_model()` (were broken since the S3 migration)
+- **`src/ml/model_store.py`** bonus fix: `"filename"` key in `logger.warning()` extra dict renamed to `"model_file"` (`filename` is a reserved `LogRecord` field that caused a `KeyError`)
+- **Tests updated**: `test_embeddings.py` and `test_agent.py` `semantic_search` tests now patch `src.storage.pgvector_store.PGVectorStore` instead of the removed `vector_store` singleton
+
+**Verified live:**
+```
+GET /health → {"status": "ok", "postgres": "up"}   # no chromadb key
+GET /search?q=affiliate+going+cold → Tom Bauer emails at top (cosine distance 0.63)
+POST /agent/quick {"message": "which affiliates need attention?"} → correct ranking
+pytest tests/ -v → 24/24 passed
+```

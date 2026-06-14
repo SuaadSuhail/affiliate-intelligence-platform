@@ -40,9 +40,14 @@ SessionLocal = sessionmaker(
 
 
 def init_db() -> None:
-    """Create all tables defined in models.py if they do not exist."""
-    Base.metadata.create_all(bind=engine)
-    logger.info("Tables created / verified.")
+    """Verify the database connection is alive.
+
+    Schema is managed by Alembic migrations.
+    Run: alembic upgrade head
+    """
+    # Schema managed by Alembic migrations — do NOT call create_all() here.
+    health_check()
+    logger.info("Database connection verified.")
 
 
 def get_db() -> Generator[Session, None, None]:

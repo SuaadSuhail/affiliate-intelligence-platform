@@ -347,6 +347,11 @@ The `docker-compose.yml` has all fixes applied. Do **not** re-add any of these:
 
 - **`version:` attribute removed** — obsolete in Docker Compose v2; omit entirely.
 - **ChromaDB removed** — replaced by pgvector; do not re-add chromadb service or CHROMA_* env vars.
+- **ChromaDB `health_check()` uses `list_collections()`** — `client.heartbeat()` calls
+  `/api/v1/heartbeat` which does not exist in ChromaDB ≥ 1.0, causing the `/health`
+  endpoint to always report `"chromadb": "down"` even when the container is healthy.
+  Fixed in `src/storage/vector_store.py` by replacing `heartbeat()` with
+  `list_collections()`, which verifies real connectivity. Do not revert to `heartbeat()`.
 
 ### Daily startup sequence
 

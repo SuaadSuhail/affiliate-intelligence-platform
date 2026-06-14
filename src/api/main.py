@@ -49,7 +49,8 @@ from src.core.logging_config import configure_logging, get_logger
 configure_logging()
 logger = get_logger(__name__)
 
-from src.storage.database import get_db, health_check as db_health
+from sqlalchemy import text
+from src.storage.database import get_db, health_check as db_health, SessionLocal
 from src.storage.models import Affiliate, Communication, ScoreHistory
 
 # ─── Routers ──────────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ from src.api.routers.process import router as process_router
 from src.api.routers.search import router as search_router
 from src.api.routers.ml import router as ml_router
 from src.api.routers.agent import router as agent_router
+from src.api.routers.admin import router as admin_router
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -131,6 +133,7 @@ app.include_router(process_router, prefix="/process", tags=["Processing"])
 app.include_router(search_router, tags=["Search"])
 app.include_router(ml_router, prefix="/ml", tags=["ML"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent"])
+app.include_router(admin_router)
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -146,16 +149,18 @@ async def startup_event() -> None:
     if not openai_key or openai_key == "placeholder":
         logger.warning("OPENAI_API_KEY is not configured — agent endpoints will be unavailable")
 
-    # Apply any pending Alembic migrations before accepting traffic
-    from pathlib import Path as _Path
-    from alembic.config import Config
-    from alembic import command as alembic_command
-    _alembic_ini = _Path(__file__).parent.parent.parent / "alembic.ini"
-    alembic_cfg = Config(str(_alembic_ini))
-    alembic_command.upgrade(alembic_cfg, "head")
-    logger.info("Database migrations applied")
+    # Verify database connectivity only — migrations are run manually via
+    # POST /admin/migrate to avoid lock contention when multiple instances start.
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        logger.info("Database connection verified")
+    except Exception as exc:
+        logger.error(f"Database connection failed: {exc}")
+        raise
 
-    routes = [r.path for r in app.routes]
+    routes = [r.path for r in app.routes if hasattr(r, "path")]
     logger.info("Application startup complete", extra={"routes_registered": len(routes)})
 
 

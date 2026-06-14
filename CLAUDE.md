@@ -739,11 +739,23 @@ Full end-to-end pipeline tested and working on `feature/data-persistence` branch
 - S3 model storage and versioning ✓
 - pgvector replaces ChromaDB — single-database architecture ✓
 
-### Week 3-4 — Planned
+### Data persistence — Complete
 
-- AWS deployment (EC2 then ECS Fargate)
-- CloudWatch structured logging
+- Alembic migrations replacing `create_all()` — schema versioned and auditable
+- Manual migration via `POST /admin/migrate` — safe for multi-instance production
+- `GET /admin/migration-status` endpoint — shows current `alembic_version` revision
+- S3-compatible model storage with local fallback (`src/ml/model_store.py`)
+- pgvector replacing ChromaDB entirely — no separate vector database container
+- Single PostgreSQL database for all storage (structured data + vectors)
+- `embeddings` table with `vector(384)` column and `ivfflat` cosine index
+- 24/24 tests passing
+
+### Planned next
+
+- AWS/Railway deployment
+- CloudWatch or structured log aggregation
 - RDS PostgreSQL with automated backups
+- Rate limiting on public endpoints
 
 ---
 

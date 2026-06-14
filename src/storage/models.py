@@ -11,6 +11,7 @@ score_history   — time-series of health scores
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Column, String, Float, Integer, DateTime, Text,
     ForeignKey, Index, Numeric, Enum,
@@ -159,3 +160,31 @@ class ScoreHistory(Base):
             f"churn={self.churn_risk_score:.2f} growth={self.growth_potential_score:.2f} "
             f"health={self.health_score:.1f} at={self.scored_at}>"
         )
+
+
+# ─── Embeddings ───────────────────────────────────────────────────────────────
+
+class Embedding(Base):
+    """One row per communication chunk — stores the 384-dim pgvector embedding."""
+
+    __tablename__ = "embeddings"
+
+    id = Column(String, primary_key=True)
+    affiliate_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("affiliates.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    affiliate_name = Column(String, nullable=True)
+    source = Column(String, nullable=True)
+    chunk_text = Column(Text, nullable=True)
+    tags = Column(ARRAY(String), nullable=True, default=list)
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    embedding = Column(Vector(384), nullable=True)
+
+    __table_args__ = (
+        Index("ix_embeddings_affiliate_id", "affiliate_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Embedding id={self.id} affiliate={self.affiliate_id}>"

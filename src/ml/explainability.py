@@ -11,32 +11,31 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-import joblib
 import numpy as np
 import pandas as pd
 import shap
 
 from src.core.logging_config import get_logger
 from src.ml.feature_engineering import FEATURE_NAMES
-from src.ml.churn_model import CHURN_MODEL_PATH
-from src.ml.growth_model import GROWTH_MODEL_PATH
+from src.ml.model_store import load_model as _store_load_model
 
 logger = get_logger(__name__)
 
 ModelType = Literal["churn", "growth"]
 
+_CHURN_FILENAME = "churn_model.pkl"
+_GROWTH_FILENAME = "growth_model.pkl"
+
 
 def _load_model(model_type: ModelType):
     """Load the appropriate saved model or return None if not found."""
-    path = CHURN_MODEL_PATH if model_type == "churn" else GROWTH_MODEL_PATH
-    if not path.exists():
-        return None
+    filename = _CHURN_FILENAME if model_type == "churn" else _GROWTH_FILENAME
     try:
-        return joblib.load(path)
+        return _store_load_model(filename)
     except Exception as exc:
         logger.error(
             "Could not load model",
-            extra={"model_type": model_type, "path": str(path), "error": str(exc)},
+            extra={"model_type": model_type, "model_file": filename, "error": str(exc)},
         )
         return None
 

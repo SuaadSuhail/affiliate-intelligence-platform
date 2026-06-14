@@ -182,23 +182,22 @@ def test_search_endpoint_returns_results():
         {
             "id": "abc_chunk_0",
             "text": "The affiliate has gone quiet and hasn't responded in weeks.",
-            "metadata": {
-                "affiliate_id": str(uuid.uuid4()),
-                "affiliate_name": "Test Affiliate",
-                "source": "email",
-                "tags": "|gone_silent|unresponsive|",
-                "occurred_at": "2026-05-01T00:00:00",
-            },
+            "affiliate_name": "Test Affiliate",
+            "source": "email",
+            "tags": ["gone_silent", "unresponsive"],
+            "occurred_at": "2026-05-01T00:00:00",
             "distance": 0.12,
         }
     ]
 
+    mock_vs_instance = MagicMock()
+    mock_vs_instance.search_similar.return_value = fake_results
+
     with (
         patch("src.ingestion.embedding_generator.model") as mock_model,
-        patch("src.ingestion.embedding_generator.vector_store") as mock_vs,
+        patch("src.storage.pgvector_store.PGVectorStore", return_value=mock_vs_instance),
     ):
         mock_model.encode.return_value = np.zeros(384)
-        mock_vs.search_similar.return_value = fake_results
 
         client = TestClient(app)
         response = client.get("/search?q=disengaged+affiliate")

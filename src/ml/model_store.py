@@ -71,7 +71,7 @@ def load_model(filename: str) -> Optional[object]:
     local_path = LOCAL_DIR / filename
 
     if USE_S3 and S3_BUCKET and not local_path.exists():
-        logger.info("Downloading model from S3", extra={"filename": filename})
+        logger.info("Downloading model from S3", extra={"model_file": filename})
         s3 = _get_s3_client()
         s3_key = f"{S3_PREFIX}{filename}"
         LOCAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,14 +80,14 @@ def load_model(filename: str) -> Optional[object]:
         except Exception as exc:
             logger.warning(
                 "S3 download failed",
-                extra={"filename": filename, "error": str(exc)},
+                extra={"model_file": filename, "error": str(exc)},
             )
             return None
 
     if local_path.exists():
         return joblib.load(local_path)
 
-    logger.warning("Model not found", extra={"filename": filename})
+    logger.warning("Model not found", extra={"model_file": filename})
     return None
 
 

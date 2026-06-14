@@ -249,14 +249,11 @@ def _get_affiliate_or_404(affiliate_id: str, db: Session) -> Affiliate:
 
 @app.get("/health", tags=["System"])
 def health() -> dict:
-    """Service health check — verifies PostgreSQL and ChromaDB."""
-    from src.storage.vector_store import vector_store
+    """Service health check — verifies PostgreSQL connectivity."""
     pg_ok = db_health()
-    chroma_ok = vector_store.health_check()
     return {
-        "status": "ok" if (pg_ok and chroma_ok) else "degraded",
+        "status": "ok" if pg_ok else "degraded",
         "postgres": "up" if pg_ok else "down",
-        "chromadb": "up" if chroma_ok else "down",
         "timestamp": datetime.utcnow().isoformat(),
     }
 

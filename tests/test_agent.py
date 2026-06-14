@@ -187,22 +187,24 @@ def test_semantic_search_returns_results():
         {
             "id": "comm_abc_chunk_0",
             "text": "I'm frustrated about the delayed payment.",
-            "metadata": {
-                "affiliate_name": "Tom Bauer",
-                "source": "email",
-                "tags": "|frustrated|churn_signal|",
-            },
+            "affiliate_name": "Tom Bauer",
+            "source": "email",
+            "tags": ["frustrated", "churn_signal"],
+            "occurred_at": "2026-05-01T00:00:00",
             "distance": 0.15,
         }
     ]
 
+    mock_vs_instance = MagicMock()
+    mock_vs_instance.search_similar.return_value = fake_results
+    mock_db = MagicMock()
+
     with (
-        patch("src.agent.tools.vector_store") as mock_vs,
+        patch("src.agent.tools._get_db", return_value=mock_db),
+        patch("src.storage.pgvector_store.PGVectorStore", return_value=mock_vs_instance),
         patch("src.ingestion.embedding_generator.model") as mock_model,
     ):
         mock_model.encode.return_value = np.zeros(384)
-        mock_vs.search_similar.return_value = fake_results
-
         result = semantic_search.invoke("frustrated affiliate payment issue")
 
     assert "Tom Bauer" in result or "frustrated" in result.lower()

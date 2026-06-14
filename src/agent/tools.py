@@ -26,7 +26,6 @@ from sqlalchemy import text
 from src.core.logging_config import get_logger
 from src.storage.database import SessionLocal
 from src.storage.models import Affiliate, Communication, ScoreHistory
-from src.storage.vector_store import vector_store
 
 logger = get_logger(__name__)
 
@@ -124,23 +123,28 @@ def semantic_search(query: str) -> str:
     except Exception as exc:
         return f"Embedding error: {exc}"
 
+    db = _get_db()
     try:
-        results = vector_store.search_similar(embedding, n_results=5)
+        from src.storage.pgvector_store import PGVectorStore
+        vs = PGVectorStore(db)
+        results = vs.search_similar(embedding, n_results=5)
     except Exception as exc:
         return f"Search error: {exc}"
+    finally:
+        db.close()
 
     if not results:
         return "No matching communications found."
 
     lines: list[str] = []
     for i, r in enumerate(results, 1):
-        meta = r.get("metadata", {})
-        text_snippet = r.get("text", r.get("document", ""))[:300]
+        text_snippet = r.get("text", "")[:300]
         score = round(1 - r.get("distance", 1.0), 3)
-        tags_str = meta.get("tags", "").strip("|").replace("|", ", ")
+        tags_list = r.get("tags", [])
+        tags_str = ", ".join(tags_list) if isinstance(tags_list, list) else str(tags_list)
         lines.append(
-            f"[{i}] Affiliate: {meta.get('affiliate_name', meta.get('affiliate_id', '?'))} "
-            f"| Source: {meta.get('source', '?')} "
+            f"[{i}] Affiliate: {r.get('affiliate_name', '?')} "
+            f"| Source: {r.get('source', '?')} "
             f"| Similarity: {score:.3f}\n"
             f"    Tags: {tags_str or 'none'}\n"
             f"    \"{text_snippet}…\""

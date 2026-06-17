@@ -17,7 +17,7 @@ import csv
 import io
 import re
 import uuid
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +62,14 @@ def ingest_affiliates_csv(path: Path) -> list[str]:
     """
     Read affiliates.csv and upsert into PostgreSQL.
     Upserts by name (new schema has no email column).
+
+    New CSV format: name, revenue_30d, ctr_trend_pct, days_since_contact, status
+    last_contact_at is computed as now() - days_since_contact so it is always
+    accurate regardless of when the pipeline runs.
+
+    Legacy CSV format (with churn_risk_score / last_contact_date columns) is
+    still supported for backward compatibility.
+
     Returns list of affiliate UUIDs processed.
     """
     ids: list[str] = []
@@ -76,28 +84,47 @@ def ingest_affiliates_csv(path: Path) -> list[str]:
                     aff = Affiliate(id=uuid.uuid4())
                     db.add(aff)
 
-                churn = float(row.get("churn_risk_score", 0.5))
-                growth = float(row.get("growth_potential_score", 0.5))
-                health = float(row.get("health_score", 50.0))
-
                 aff.name = row["name"]
-                aff.status = _derive_status(churn, growth)
-                aff.churn_risk_score = churn
-                aff.growth_potential_score = growth
-                aff.health_score = health
-                aff.revenue_30d = float(row.get("monthly_revenue", 0))
-                aff.ctr_trend_pct = 0.0
 
-                raw_lc = row.get("last_contact_date") or row.get("last_contact_at")
-                if raw_lc:
-                    try:
-                        lc_dt = datetime.fromisoformat(raw_lc)
-                        if lc_dt.tzinfo is None:
-                            lc_dt = lc_dt.replace(tzinfo=timezone.utc)
-                        aff.last_contact_at = lc_dt
-                        aff.days_since_contact = _compute_days_since(lc_dt)
-                    except ValueError:
-                        pass
+                # Revenue — support both column names
+                aff.revenue_30d = float(
+                    row.get("revenue_30d") or row.get("monthly_revenue") or 0
+                )
+
+                # CTR trend
+                aff.ctr_trend_pct = float(row.get("ctr_trend_pct", 0.0))
+
+                # Status — use CSV value if present, otherwise derive from scores
+                if row.get("status"):
+                    aff.status = row["status"]
+                else:
+                    churn = float(row.get("churn_risk_score", 0.5))
+                    growth = float(row.get("growth_potential_score", 0.5))
+                    aff.status = _derive_status(churn, growth)
+
+                # Initial ML scores — kept at defaults so the ML pipeline
+                # can overwrite them cleanly on first scoring run
+                aff.churn_risk_score = float(row.get("churn_risk_score", 0.5))
+                aff.growth_potential_score = float(row.get("growth_potential_score", 0.5))
+                aff.health_score = float(row.get("health_score", 50.0))
+
+                # Compute last_contact_at from days_since_contact (new format)
+                if row.get("days_since_contact"):
+                    days = int(row["days_since_contact"])
+                    aff.days_since_contact = days
+                    aff.last_contact_at = datetime.now(timezone.utc) - timedelta(days=days)
+                else:
+                    # Legacy format: parse explicit last_contact_date / last_contact_at
+                    raw_lc = row.get("last_contact_date") or row.get("last_contact_at")
+                    if raw_lc:
+                        try:
+                            lc_dt = datetime.fromisoformat(raw_lc)
+                            if lc_dt.tzinfo is None:
+                                lc_dt = lc_dt.replace(tzinfo=timezone.utc)
+                            aff.last_contact_at = lc_dt
+                            aff.days_since_contact = _compute_days_since(lc_dt)
+                        except ValueError:
+                            pass
 
                 ids.append(str(aff.id))
                 logger.debug("Affiliate upserted", extra={"name": aff.name})
@@ -110,9 +137,67 @@ def ingest_affiliates_csv(path: Path) -> list[str]:
 
 def _parse_blocks(text: str) -> list[dict]:
     """
-    Parse ===RECORD_NNN=== delimited blocks from emails.txt / transcripts.txt.
-    Returns list of raw field dicts.
+    Parse communication blocks from emails.txt / transcripts.txt.
+
+    Auto-detects format:
+    - New format:    [AFFILIATE: Name] / [DATE: N days ago] / [SOURCE: type]
+                     blocks separated by --- lines
+    - Legacy format: ===RECORD_NNN=== delimiter with key: value headers
     """
+    text = text.strip()
+    if text.startswith("["):
+        return _parse_bracket_blocks(text)
+    return _parse_legacy_blocks(text)
+
+
+def _parse_bracket_blocks(text: str) -> list[dict]:
+    """Parse [KEY: VALUE] header blocks separated by --- lines."""
+    records = []
+    raw_blocks = re.split(r"\n\s*---+\s*\n", text)
+
+    for block in raw_blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        record: dict = {}
+        lines = block.split("\n")
+        content_lines: list[str] = []
+        header_done = False
+
+        for line in lines:
+            if not header_done:
+                m = re.match(r"^\[([A-Za-z]+):\s*(.+?)\]\s*$", line.strip())
+                if m:
+                    record[m.group(1).upper()] = m.group(2).strip()
+                    continue
+                elif not line.strip():
+                    if record:
+                        header_done = True
+                    continue
+                else:
+                    header_done = True
+            content_lines.append(line)
+
+        record["raw_text"] = "\n".join(content_lines).strip()
+
+        # Resolve "N days ago" → ISO timestamp
+        date_str = record.get("DATE", "")
+        m = re.match(r"(\d+)\s+days?\s+ago", date_str, re.IGNORECASE)
+        if m:
+            days = int(m.group(1))
+            record["occurred_at"] = (
+                datetime.now(timezone.utc) - timedelta(days=days)
+            ).isoformat()
+
+        if record.get("AFFILIATE"):
+            records.append(record)
+
+    return records
+
+
+def _parse_legacy_blocks(text: str) -> list[dict]:
+    """Parse ===RECORD_NNN=== delimited blocks (original format)."""
     blocks = re.split(r"===\w+===", text)
     records = []
     for block in blocks:
@@ -131,7 +216,6 @@ def _parse_blocks(text: str) -> list[dict]:
                 in_content = True
                 content_lines.append(line)
         raw = "\n".join(content_lines).strip()
-        # Strip EXPECTED TAGS comment
         raw = re.sub(r"\n---\nEXPECTED TAGS:.*$", "", raw, flags=re.DOTALL).strip()
         record["raw_text"] = raw
         if record.get("affiliate_id"):
@@ -154,12 +238,24 @@ def ingest_communications_file(path: Path) -> list[str]:
 
     with db_session() as db:
         for block in blocks:
-            affiliate_id_str = block.get("affiliate_id", "").strip()
-            affiliate = _find_affiliate_by_mock_id(db, affiliate_id_str)
+            # New format uses AFFILIATE (name); legacy format uses affiliate_id (mock ID)
+            if block.get("AFFILIATE"):
+                affiliate_name = block["AFFILIATE"].strip()
+                affiliate = (
+                    db.query(Affiliate).filter(Affiliate.name == affiliate_name).first()
+                )
+                channel_raw = block.get("SOURCE", "email").lower()
+                mock_ref = affiliate_name
+            else:
+                affiliate_id_str = block.get("affiliate_id", "").strip()
+                affiliate = _find_affiliate_by_mock_id(db, affiliate_id_str)
+                channel_raw = block.get("channel", "email").lower()
+                mock_ref = affiliate_id_str
+
             if not affiliate:
                 logger.warning(
                     "Affiliate not found — skipping communication",
-                    extra={"mock_id": affiliate_id_str},
+                    extra={"mock_id": mock_ref},
                 )
                 continue
 
@@ -172,8 +268,6 @@ def ingest_communications_file(path: Path) -> list[str]:
                 occurred_at = datetime.now(timezone.utc)
 
             raw_text = block.get("raw_text", "")
-            # Map block channel → Communication.source enum
-            channel_raw = block.get("channel", "email").lower()
             source = _SOURCE_MAP.get(channel_raw, "email")
 
             comm = Communication(

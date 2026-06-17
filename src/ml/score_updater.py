@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session
 from src.core.logging_config import get_logger
 from src.storage.models import Affiliate, ScoreHistory
 from src.ml.feature_engineering import build_feature_vector
-from src.ml.churn_model import predict_churn_risk
-from src.ml.growth_model import predict_growth_potential
+from src.ml.churn_model import calculate_churn_risk_rules
+from src.ml.growth_model import calculate_growth_potential_rules
 
 logger = get_logger(__name__)
 
@@ -73,9 +73,9 @@ def update_all_scores(db: Session) -> dict:
         # 1. Build feature vector
         features = build_feature_vector(affiliate_id, db)
 
-        # 2 & 3. Predict scores
-        churn_score = predict_churn_risk(affiliate_id, features)
-        growth_score = predict_growth_potential(affiliate_id, features)
+        # 2 & 3. Predict scores (rule-based primary — CLAUDE.md §5)
+        churn_score = calculate_churn_risk_rules(features)
+        growth_score = calculate_growth_potential_rules(features)
 
         # 4. Compute health_score (CLAUDE.md formula)
         health = round(((1 - churn_score) * 0.6 + growth_score * 0.4) * 100, 1)

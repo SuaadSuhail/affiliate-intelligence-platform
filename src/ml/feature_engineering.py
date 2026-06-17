@@ -55,12 +55,8 @@ def _make_aware(dt: datetime) -> datetime:
 
 
 def _derive_status(aff: Affiliate) -> str:
-    """Derive a status label from existing score columns."""
-    if (aff.churn_risk_score or 0.0) > 0.7:
-        return "at_risk"
-    if (aff.growth_potential_score or 0.0) > 0.7:
-        return "high_growth"
-    return "active"
+    """Return the affiliate's current status for use as a training label."""
+    return str(aff.status) if aff.status else "active"
 
 
 # ─── Core feature builder ─────────────────────────────────────────────────────
@@ -118,8 +114,7 @@ def build_feature_vector(affiliate_id: str, db: Session) -> dict:
     # revenue_30d (new schema) or fall back to monthly_revenue (old schema)
     revenue_30d = float(getattr(aff, "revenue_30d", None) or getattr(aff, "monthly_revenue", None) or 0.0)
 
-    # ctr_trend_pct is not stored in this schema — default to 0.0
-    ctr_trend_pct = 0.0
+    ctr_trend_pct = float(getattr(aff, "ctr_trend_pct", 0.0) or 0.0)
 
     # ── GROUP 2: Communication features ──────────────────────────────────────
 

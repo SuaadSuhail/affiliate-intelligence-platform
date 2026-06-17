@@ -1043,3 +1043,59 @@ GET /search?q=affiliate+going+cold → Tom Bauer emails at top (cosine distance 
 POST /agent/quick {"message": "which affiliates need attention?"} → correct ranking
 pytest tests/ -v → 24/24 passed
 ```
+---
+
+## 14. Mock Data State
+
+### Current verified pipeline state — `feature/better-mock-data`
+
+| Step | Endpoint | Result |
+|---|---|---|
+| Ingest | `POST /ingest/full` | 10 affiliates + 13 communications loaded |
+| NLP | `POST /process/nlp` | 13/13 communications tagged |
+| Embeddings | `POST /process/embeddings` | 13 embedded, 13 chunks in pgvector |
+| Train | `POST /ml/train` | churn + growth XGBoost models trained (10 samples) |
+| Score | `POST /ml/score` | 10 affiliates scored via rule-based scorer |
+| Agent | `POST /agent/quick` | Correctly identifies Tom, Marcus, James as urgent |
+
+### 10 affiliates — differentiated profiles
+
+| Affiliate | health | churn | growth | days | status |
+|---|---|---|---|---|---|
+| Rachel Torres | 100.0 | 0.00 | 1.00 | 6 | high_growth |
+| Priya Sharma | 94.0 | 0.10 | 1.00 | 8 | high_growth |
+| Sarah Chen | 94.0 | 0.10 | 1.00 | 9 | active |
+| Aiko Tanaka | 94.0 | 0.10 | 1.00 | 11 | active |
+| Fatima Al-Hassan | 91.2 | 0.10 | 0.93 | 10 | active |
+| Nkechi Okonkwo | 65.2 | 0.10 | 0.28 | 12 | active |
+| Carlos Mendez | 59.2 | 0.20 | 0.28 | 15 | active |
+| James O'Brien | 33.0 | 0.45 | 0.00 | 30 | at_risk |
+| Marcus Williams | 32.2 | 0.65 | 0.28 | 18 | at_risk |
+| Tom Bauer | 15.0 | 0.75 | 0.00 | 40 | churned |
+
+### 13 communications — tag coverage
+
+**10 emails** (one per affiliate) + **3 transcripts** (Tom Bauer, Rachel Torres, Marcus Williams):
+
+| Affiliate | Source | Key tags triggered |
+|---|---|---|
+| Tom Bauer | email (45d) | churn_signal, competitor_mention, disengaged_tone, frustrated |
+| Tom Bauer | call (40d) | churn_signal, competitor_mention, stalled_deal, escalation, frustrated |
+| James O'Brien | email (30d) | disengaged_tone, stalled_deal, follow_up_needed, gone_silent |
+| Marcus Williams | email (20d) | complaint, escalation, frustrated, follow_up_needed |
+| Marcus Williams | call (18d) | complaint, escalation, frustrated, action_committed |
+| Carlos Mendez | email (15d) | neutral_sentiment, follow_up_needed |
+| Nkechi Okonkwo | email (12d) | neutral_sentiment, action_committed |
+| Fatima Al-Hassan | email (10d) | positive_sentiment, campaign_active, responsive |
+| Aiko Tanaka | email (11d) | positive_sentiment, new_campaign_intent, question_asked |
+| Sarah Chen | email (9d) | positive_sentiment, expansion_interest, upsell_signal |
+| Priya Sharma | email (8d) | enthusiastic, positive_sentiment, expansion_interest, new_campaign_intent |
+| Rachel Torres | email (7d) | enthusiastic, positive_sentiment, campaign_active, action_committed |
+| Rachel Torres | call (6d) | enthusiastic, expansion_interest, action_committed, positive_sentiment |
+
+### Design notes
+
+- **`days_since_contact` is computed relative to today** — `last_contact_at = now() - timedelta(days=N)` in ETL, so dates stay accurate regardless of when the pipeline runs.
+- **Communications outside the 30-day window** (Tom's comms at 40d and 45d) contribute to `days_since_contact` and `ctr_trend_pct` churn signals but NOT to `churn_signal_count` or `competitor_mention_count` (which only count 30-day window comms). The `comm_count_30d == 0` rule (+0.15) still fires for Tom.
+- **Rule-based scoring is primary** (`score_updater.py` calls `calculate_churn_risk_rules` / `calculate_growth_potential_rules` directly). XGBoost is trained and available for `predict_churn_risk` / `predict_growth_potential` calls (e.g. explainability) but not used in the score update loop — with 10 samples it produces near-identical predictions for all affiliates.
+- **Bug fixed** (`src/api/main.py` `AffiliateOut.from_orm`): `a.churn_risk_score or 0.5` replaced with `a.churn_risk_score if a.churn_risk_score is not None else 0.5` — the `or` form treats `0.0` as falsy and incorrectly returns `0.5` for affiliates with zero churn risk.

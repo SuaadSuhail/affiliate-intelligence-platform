@@ -191,9 +191,9 @@ class AffiliateOut(BaseModel):
             id=str(a.id),
             name=a.name,
             status=a.status or "active",
-            churn_risk_score=round(a.churn_risk_score or 0.5, 4),
-            growth_potential_score=round(a.growth_potential_score or 0.5, 4),
-            health_score=round(a.health_score or 50.0, 1),
+            churn_risk_score=round(a.churn_risk_score if a.churn_risk_score is not None else 0.5, 4),
+            growth_potential_score=round(a.growth_potential_score if a.growth_potential_score is not None else 0.5, 4),
+            health_score=round(a.health_score if a.health_score is not None else 50.0, 1),
             revenue_30d=float(a.revenue_30d or 0.0),
             days_since_contact=int(a.days_since_contact or 0),
             last_contact_at=(

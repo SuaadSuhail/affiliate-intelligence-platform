@@ -667,6 +667,7 @@ These files had stale imports and old schema field names that caused runtime fai
 - `GET /agent/health` returns `{agent_ready, openai_key_configured, model, last_error}` with no
   API call — useful for readiness checks without spending tokens
 - Demo endpoint (`GET /agent/demo`) runs 3 questions sequentially; requires models trained first
+- **`SYSTEM_PROMPT` scope restriction**: the prompt ends with `IMPORTANT SCOPE RULES` that instruct the agent to refuse any question not related to affiliate management (general knowledge, news, politics, geography, etc.) and respond with a fixed out-of-scope message. The agent must only use tool data — never its own general knowledge.
 
 **Depends on:** All pipeline steps must have run: `/ingest/full` → `/process/nlp` →
 `/process/embeddings` → `/ml/train` → `/ml/score`

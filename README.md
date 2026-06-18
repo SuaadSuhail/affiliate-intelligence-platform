@@ -64,7 +64,7 @@ Tools used: get_affiliate_summary, draft_email
 ┌────────────────────────▼────────────────────────────────┐
 │  3. Storage                                              │
 │     PostgreSQL (affiliates, communications, scores)      │
-│     ChromaDB  (384-dim communication embeddings)         │
+│     pgvector  (384-dim communication embeddings)         │
 └────────────────────────┬────────────────────────────────┘
                          │
           ┌──────────────┴──────────────┐
@@ -95,10 +95,10 @@ Tools used: get_affiliate_summary, draft_email
 | ML models | XGBoost, SHAP, scikit-learn |
 | NLP | spaCy (`en_core_web_sm`), custom sentiment lexicon |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (384 dims) |
-| Vector store | ChromaDB (cosine similarity) |
+| Vector store | pgvector (cosine similarity, PostgreSQL extension) |
 | Database | PostgreSQL, SQLAlchemy ORM |
 | Infrastructure | Docker, Docker Compose |
-| Frontend | Vanilla HTML / CSS / JS (no framework) |
+| Frontend | React, TypeScript, Vite, Tailwind CSS, Recharts |
 | Testing | pytest |
 
 ---
@@ -107,7 +107,7 @@ Tools used: get_affiliate_summary, draft_email
 
 - **360° health score** — composite metric combining churn risk (0–1) and growth potential (0–1) into a 0–100 score: `((1 − churn) × 0.6 + growth × 0.4) × 100`
 - **21-tag NLP classification** — each communication is tagged across four groups (engagement, sentiment, intent, relationship) using spaCy NER plus a 40-word custom sentiment lexicon
-- **Semantic search** — ChromaDB embedding search over all email and call transcript content; returns the most semantically relevant communications for any natural-language query
+- **Semantic search** — pgvector embedding search over all email and call transcript content; returns the most semantically relevant communications for any natural-language query
 - **SHAP explainability** — every XGBoost prediction includes top-5 SHAP feature importances identifying the specific drivers of churn risk or growth potential for each affiliate
 - **ReAct agent with 5 tools** — the LangChain agent autonomously decides which tools to call, chains multiple results together, and produces a coherent answer with source attribution
 - **Browser chat interface** — two-panel UI with live portfolio stats, affiliate health bars, conversation history, tools-used attribution, and suggested questions
@@ -130,7 +130,7 @@ affiliate-intelligence-platform/
 │   ├── ingestion/
 │   │   ├── etl_pipeline.py     ← CSV + flat-file data loading
 │   │   ├── nlp_processor.py    ← spaCy tagging + sentiment scoring
-│   │   └── embedding_generator.py ← chunk, encode, store in ChromaDB
+│   │   └── embedding_generator.py ← chunk, encode, store in pgvector
 │   ├── ml/
 │   │   ├── feature_engineering.py ← 12-feature vector builder
 │   │   ├── churn_model.py      ← XGBoost churn + rule-based fallback
@@ -140,11 +140,11 @@ affiliate-intelligence-platform/
 │   └── storage/
 │       ├── models.py           ← SQLAlchemy ORM models
 │       ├── database.py         ← engine, session factory, get_db()
-│       └── vector_store.py     ← ChromaDB wrapper, add/search
-├── data/mock/                  ← 10 affiliate profiles, 7 communications
+│       └── pgvector_store.py   ← pgvector wrapper, add/search
+├── data/mock/                  ← 10 affiliate profiles, 13 communications
 ├── tests/                      ← pytest suite (24 tests across 4 files)
 ├── models/                     ← XGBoost artefacts (gitignored)
-└── docker-compose.yml          ← PostgreSQL + ChromaDB services
+└── docker-compose.yml          ← PostgreSQL (with pgvector extension)
 ```
 
 ---
@@ -176,29 +176,35 @@ cp .env.example .env
 
 # 4. Start the infrastructure
 docker compose up -d
-# PostgreSQL → :5432  |  ChromaDB → :8001
+# PostgreSQL → :5432  |  App → :8080
 
-# 5. Start the API server
-uvicorn src.api.main:app --port 8080 --reload
+# 5. Run migrations (required on first setup)
+curl -X POST http://localhost:8080/admin/migrate \
+  -H "X-Api-Key: change-me-in-production"
 ```
 
 ### Run the Data Pipeline
 
 ```bash
 # Load affiliates and communications from mock data files
-curl -X POST http://localhost:8080/ingest/full
+curl -X POST http://localhost:8080/ingest/full \
+  -H "X-Api-Key: change-me-in-production"
 
 # Run NLP tagging on all communications
-curl -X POST http://localhost:8080/process/nlp
+curl -X POST http://localhost:8080/process/nlp \
+  -H "X-Api-Key: change-me-in-production"
 
 # Generate and index communication embeddings
-curl -X POST http://localhost:8080/process/embeddings
+curl -X POST http://localhost:8080/process/embeddings \
+  -H "X-Api-Key: change-me-in-production"
 
 # Train churn and growth XGBoost models
-curl -X POST http://localhost:8080/ml/train
+curl -X POST http://localhost:8080/ml/train \
+  -H "X-Api-Key: change-me-in-production"
 
 # Score all affiliates
-curl -X POST http://localhost:8080/ml/score
+curl -X POST http://localhost:8080/ml/score \
+  -H "X-Api-Key: change-me-in-production"
 ```
 
 ### Open the Interface
@@ -225,6 +231,10 @@ Navigate to **[http://localhost:8080](http://localhost:8080)**
 | `POST` | `/agent/chat` | Chat with the ReAct agent (with history) |
 | `POST` | `/agent/quick` | Single-turn agent query |
 | `GET` | `/agent/demo` | Run three preset demo questions |
+| `GET` | `/agent/health` | Check agent status |
+| `POST` | `/admin/migrate` | Run database migrations |
+| `GET` | `/admin/migration-status` | Check migration version |
+| `GET` | `/task/{task_id}` | Poll background task status |
 | `GET` | `/docs` | Interactive Swagger UI |
 
 ---
@@ -320,15 +330,25 @@ alembic history         # show all migrations
 
 ---
 
+## Frontend
+
+The React frontend is in a separate repository:
+https://github.com/SuaadSuhail/affiliate-intelligence-frontend
+
+---
+
 ## Security
 
 All write endpoints require an API key header:
 
 ```
-X-Api-Key: your-secret-key
+X-Api-Key: your-api-key
 ```
 
-Set `API_SECRET_KEY` in your `.env` file. Set `ALLOWED_ORIGINS` to your domain in production.
+Set `API_SECRET_KEY` in your `.env` file.
+Default for local dev: `change-me-in-production`
+
+Set `ALLOWED_ORIGINS` to your domain in production.
 
 In development (`APP_ENV=development`) auth is bypassed automatically.
 

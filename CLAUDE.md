@@ -722,6 +722,201 @@ Full end-to-end pipeline tested and working on `feature/data-persistence` branch
 
 ---
 
+### Promo code leakage detector
+
+| | |
+|---|---|
+| **Status** | Complete — `feature/promo-leakage-detector` branch |
+| **Files** | `src/scraping/site_config.py`, `src/scraping/fetcher.py`, `src/scraping/extractor.py`, `src/scraping/matcher.py`, `src/scraping/leakage_scraper.py`, `src/scraping/__init__.py`, `src/scraping/fixtures/voucherslug_mock.html`, `src/scraping/fixtures/dealsden_mock.html`, `src/scraping/fixtures/csr_shell_mock.html`, `src/scraping/fixtures/csr_shell_mock.js`, `src/scheduling/jobs.py`, `src/scheduling/__init__.py`, `src/storage/models.py` (additions), `src/agent/tools.py` (addition), `src/api/routers/leakage.py` |
+| **Migration** | `alembic/versions/9d115196b272_add_leaked_codes_table_and_affiliate_.py` |
+| **Tests** | `tests/test_leakage_scraper.py` — 8 tests, all passing |
+
+**What it does:** Detects when an affiliate's promo code appears on monitored
+voucher or deal aggregator sites without authorisation. Two callers share one
+code path — `check_leakage(db, scan_type="scheduled")` from the nightly
+APScheduler job, and `check_leakage(db, scan_type="on_demand")` triggered via
+the API or the agent tool. A single entry-point was chosen deliberately: the
+fetch → extract → match → persist pipeline is identical in both contexts and
+duplicating it would create two things to keep in sync.
+
+**Schema additions (`src/storage/models.py`):**
+- `affiliates.active_promo_code` — `VARCHAR(64) NULLABLE`; the code this
+  affiliate is currently authorised to share. `NULL` means no code registered;
+  those affiliates are skipped silently during every scan.
+- `leaked_codes` table — one row per detection event:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `affiliate_id` | UUID FK → `affiliates.id` | CASCADE delete |
+| `code` | VARCHAR(64) | The promo code found |
+| `site` | VARCHAR(128) | Site name from `SiteConfig.name` |
+| `source_url` | TEXT | Full page URL or fixture `file://` path |
+| `raw_snippet` | TEXT NULLABLE | Surrounding HTML kept for audit |
+| `scan_type` | VARCHAR(16) | `"scheduled"` or `"on_demand"` |
+| `found_at` | TIMESTAMPTZ | UTC timestamp of detection |
+
+Indexes on `affiliate_id` and `code`.
+
+**Key functions:**
+
+| Function | Signature | Description |
+|---|---|---|
+| `check_leakage` | `(db, scan_type, affiliate_id=None) -> dict` | Orchestrator: fetch → extract → match → dedup → persist; commits once at the end |
+| `fetch_html` | `(url, kind="live") -> str` | Playwright-based fetcher for SSR and CSR pages |
+| `extract_candidate_codes` | `(html, site) -> list[CandidateCode]` | Two-pass selector + regex extraction |
+| `match_candidates_to_affiliates` | `(candidates, affiliate_codes, site_name, source_url) -> list[LeakMatch]` | Case-normalised exact matching |
+| `run_scheduled_leakage_scan` | `() -> None` | Wraps `check_leakage` for APScheduler; creates its own `SessionLocal()` |
+| `start_scheduler` | `() -> BackgroundScheduler` | Idempotent — returns running scheduler if already started |
+
+**Fetcher design (`src/scraping/fetcher.py`):**
+
+Playwright's headless Chromium was chosen over a `requests`-only approach
+because voucher aggregator sites are frequently client-side rendered — a plain
+HTTP GET of the HTML shell returns an empty `<div id="app">` with no codes.
+Playwright handles both SSR and CSR pages with one mechanism.
+
+Three behaviours for `kind="live"` (http/https) only:
+- **robots.txt** — checked before every fetch via `urllib.robotparser`; fails
+  closed: if `robots.txt` cannot be retrieved for any reason the fetch is
+  aborted and the site goes to `sites_failed`. `file://` URLs are exempt (no
+  robots.txt concept for local files).
+- **Rate limit** — `_MIN_GAP_SECONDS = 3.0` enforced per host via
+  `_last_request` dict; subsequent requests to the same host sleep until the
+  gap is satisfied.
+- **CSR fixtures** — `csr_shell_mock.html` is a `file://` URL pointing at an
+  empty `<div id="app">`. Playwright navigates `file://` URLs natively and
+  executes the adjacent `csr_shell_mock.js`, which injects the rendered voucher
+  card. This confirms the fetcher correctly handles JS-driven pages without any
+  special casing.
+
+For `kind="fixture"` (the two static SSR fixtures), the file is read directly
+from disk — Playwright is not invoked, keeping the fixture tests fast.
+
+**Extractor design (`src/scraping/extractor.py`):**
+
+Two passes run in sequence; results are deduplicated by uppercased code value
+before returning.
+
+1. **Selector pass** — CSS selectors from `SiteConfig.code_selectors` target
+   precise elements; sibling/parent traversal via `SiteConfig.merchant_selectors`
+   captures the merchant name. High-confidence, site-specific.
+2. **Regex fallback** — `_CODE_PATTERN` scans `soup.body.get_text()` for any
+   code-shaped token not already found by the selector pass. Catches codes on
+   pages that don't match the expected HTML structure.
+
+Two bugs were found and fixed during development — both are recorded here because
+they explain why the code looks the way it does:
+
+- **`\b` word-boundary regex failing on hyphenated codes** — `\b` considers
+  `-` a non-word character, so it fires at every interior hyphen boundary.
+  `TOMB-EXCL20` was silently truncated to `EXCL20` (wrong match) or `TOMB-`
+  (incomplete). Fixed by replacing `\b` with negative lookarounds that use the
+  token's own character class `[A-Z0-9\-]`:
+  `(?<![A-Z0-9\-])([A-Z0-9][A-Z0-9\-]{3,14})(?![A-Z0-9\-])`.
+
+- **`<title>` false positive** — `soup.get_text()` includes the `<head>`
+  block. A title such as `<title>CSR Shell — Mock JS-Rendered Page</title>`
+  produced the spurious candidate `JS-R` because "JS-Rendered" contains a
+  capital-letter hyphen sequence that passes the code-shape heuristic. Fixed by
+  scoping the regex fallback to `soup.body.get_text()` only.
+
+**Dedup window (`src/scraping/leakage_scraper.py`):**
+
+`_DEDUP_WINDOW_HOURS = 20`. Before persisting a new `LeakedCode` row, the
+orchestrator queries whether the same `(affiliate_id, code, site)` triple
+already exists with `found_at` within the past 20 hours. If so, the row is
+skipped. This prevents the nightly job (03:00 UTC) from flooding the table with
+identical rows across consecutive runs while a leak is ongoing; 20 hours was
+chosen to give a comfortable margin below 24 hours so back-to-back days never
+accidentally deduplicate across runs.
+
+**Scheduler (`src/scheduling/jobs.py`):**
+
+APScheduler `BackgroundScheduler(timezone="UTC")` with a `CronTrigger(hour=3,
+minute=0)`. `start_scheduler()` is called once from `src/api/main.py`
+`startup_event()` and is idempotent — if the scheduler is already running it
+returns it unchanged. `run_scheduled_leakage_scan()` creates its own
+`SessionLocal()` and closes it in `finally` (never shares the HTTP request
+session).
+
+**Agent tool (`src/agent/tools.py`):**
+
+`check_promo_leakage` is Tool 6, added to the existing `TOOLS` list. It runs an
+on-demand scan immediately for a specific affiliate UUID. The tool docstring
+explains to the agent how to obtain the UUID first (`query_database` → SELECT
+id WHERE name ILIKE).
+
+Updated tool count — **Tools (6):**
+
+| Tool | Description |
+|---|---|
+| `query_database` | Raw SQL SELECT against PostgreSQL; validates SELECT-only, max 20 rows |
+| `semantic_search` | pgvector cosine search over communications via `PGVectorStore(db).search_similar()` |
+| `get_affiliate_summary` | Full affiliate profile: scores, recent comms, risk signals, recommended action |
+| `draft_email` | LLM-generated re-engagement email; template fallback when API key missing |
+| `get_portfolio_health` | Whole-portfolio aggregate stats: health, churn, growth counts |
+| `check_promo_leakage` | Live leakage scan for one affiliate's promo code across all configured sites |
+
+**API endpoints (`src/api/routers/leakage.py`):**
+
+Router registered in `main.py` under prefix `/leakage`. POST route requires
+`X-Api-Key` (via `Depends(get_api_key)`); GET routes are unprotected.
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/leakage/scan` | Start a full portfolio leakage scan as a background task; returns `task_id` |
+| `GET` | `/leakage/results` | All `LeakedCode` rows, newest first |
+| `GET` | `/leakage/results/{affiliate_id}` | All leak events for one affiliate; returns `[]` (not 404) if none |
+
+**Dockerfile base image change:**
+
+`python:3.11-slim` → `mcr.microsoft.com/playwright/python:v1.61.0-jammy`
+
+This is a meaningful infrastructure change, not a cosmetic one. The slim Python
+image does not include a browser binary; adding `pip install playwright` alone
+installs the Python bindings but not Chromium. Running `playwright install
+chromium` inside the build would work, but the MCR image already has Chromium
+baked in at `/ms-playwright/` and sets `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`
+so the Python package finds it automatically. The MCR image ships Python 3.10.12
+(no 3.11 tag exists for this Playwright version); the codebase is compatible
+with 3.10+.
+
+**New dependencies (added to `requirements.txt`):**
+- `playwright>=1.44.0` — headless Chromium for SSR and CSR page rendering
+- `beautifulsoup4>=4.12.0` — HTML parsing for selector and regex extraction passes
+- `lxml>=5.2.0` — faster BeautifulSoup parser backend
+- `apscheduler>=3.10.0` — background scheduler for the nightly leakage job
+
+**Test coverage (`tests/test_leakage_scraper.py`, 8 tests):**
+
+| Test | What it covers |
+|---|---|
+| `test_extractor_finds_leaked_code_in_fixture` | CSS selector path; asserts TESTLEAK20 + TOMB-EXCL20 with correct merchant context |
+| `test_extractor_no_false_positive_on_clean_fixture` | Exactly 3 codes from dealsden; no cross-contamination from other fixtures |
+| `test_extractor_handles_csr_rendered_content` | Playwright executes the JS shell and CSRLEAK99 is injected and found |
+| `test_extractor_title_text_not_falsely_matched` | Regression for `JS-R` false positive from `<title>`; confirms `soup.body` fix |
+| `test_matcher_exact_match_only` | Case normalisation works; trailing space matches; TESTLEAK21 ≠ TESTLEAK20 |
+| `test_check_leakage_end_to_end_writes_expected_rows` | Real DB; one LeakedCode row with correct fields; cleans up in `finally` |
+| `test_check_leakage_dedup_window_prevents_duplicate` | Real DB; two back-to-back scans → 1 leak row total |
+| `test_check_leakage_isolates_site_failures` | Injected broken site goes to `sites_failed`; working sites still produce leaks |
+
+**Deliberately out of scope for this branch:**
+
+- **No live voucher sites are enabled.** `SITES` in `src/scraping/site_config.py`
+  contains only the three fixture entries. A commented-out live `SiteConfig`
+  example is present in that file with a checklist (robots.txt verification,
+  rate limit confirmation, ToS review) that must be completed before any real
+  site is added.
+- **No numeric integration into `churn_risk_score`.** `check_leakage()` writes
+  only to `leaked_codes` — it never touches `affiliates.churn_risk_score`,
+  `growth_potential_score`, or `health_score`. The intent is flag-now,
+  score-later: once the detection pipeline is proven reliable, a future branch
+  will add a scoring rule that increases `churn_risk_score` for affiliates with
+  recent unresolved leaks.
+
+---
+
 ## 13. Production Hardening
 
 ### Week 1 — Complete

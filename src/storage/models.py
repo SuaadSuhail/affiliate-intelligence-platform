@@ -6,10 +6,11 @@ Tables
 affiliates      — one row per affiliate partner
 communications  — every email / call / api_event
 score_history   — time-series of health scores
+leaked_codes    — promo/discount code leak detection events
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -50,6 +51,9 @@ class Affiliate(Base):
     last_contact_at = Column(DateTime(timezone=True), nullable=True)
     days_since_contact = Column(Integer, nullable=False, default=0)
 
+    # Promo code currently assigned to this affiliate
+    active_promo_code = Column(String(64), nullable=True)
+
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -63,6 +67,9 @@ class Affiliate(Base):
     )
     score_history = relationship(
         "ScoreHistory", back_populates="affiliate", cascade="all, delete-orphan"
+    )
+    leaked_codes = relationship(
+        "LeakedCode", back_populates="affiliate", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -188,3 +195,41 @@ class Embedding(Base):
 
     def __repr__(self) -> str:
         return f"<Embedding id={self.id} affiliate={self.affiliate_id}>"
+
+
+# ─── LeakedCodes ──────────────────────────────────────────────────────────────
+
+class LeakedCode(Base):
+    """One row per detected promo/discount code leak event."""
+
+    __tablename__ = "leaked_codes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    affiliate_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("affiliates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    code = Column(String(64), nullable=False)
+    site = Column(String(128), nullable=False)       # site name, e.g. "voucherslug-mock"
+    source_url = Column(Text, nullable=False)         # full page URL or fixture file path
+    raw_snippet = Column(Text, nullable=True)         # HTML/text the code was found in
+    scan_type = Column(String(16), nullable=False, default="scheduled")  # "scheduled" | "on_demand"
+    found_at = Column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    affiliate = relationship("Affiliate", back_populates="leaked_codes")
+
+    __table_args__ = (
+        Index("ix_leaked_codes_affiliate_id", "affiliate_id"),
+        Index("ix_leaked_codes_code", "code"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<LeakedCode id={self.id} affiliate={self.affiliate_id} "
+            f"code={self.code!r} site={self.site!r}>"
+        )

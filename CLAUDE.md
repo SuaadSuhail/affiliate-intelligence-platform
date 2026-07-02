@@ -248,7 +248,7 @@ via `app.include_router(...)`. Startup logs the total registered route count.
 
 | Method | Path | Router file | Description |
 |---|---|---|---|
-| GET | `/health` | main.py | Service health check (PostgreSQL + ChromaDB) |
+| GET | `/health` | main.py | Service health check (PostgreSQL) |
 | GET | `/task/{task_id}` | main.py | Poll status of a background task |
 | GET | `/affiliates` | main.py | List affiliates with filtering + sorting |
 | GET | `/affiliates/{id}` | main.py | Single affiliate with score history |
@@ -304,7 +304,7 @@ See `.env.example` for all required variables. Never commit `.env`.
 ## 9. Running Locally
 
 ```bash
-docker compose up -d                          # start PostgreSQL + ChromaDB
+docker compose up -d                          # start PostgreSQL (pgvector)
 conda activate affiliate-intelligence         # or: pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 uvicorn src.api.main:app --port 8080 --reload # start API on :8080

@@ -7,7 +7,7 @@ to decide when to call the tool — keep them descriptive.
 Tools
 -----
 1. query_database        — raw SQL SELECT against PostgreSQL
-2. semantic_search       — ChromaDB embedding search over communications
+2. semantic_search       — pgvector embedding search over communications
 3. get_affiliate_summary — full profile for one affiliate
 4. draft_email           — LLM-generated personalised email draft
 5. get_portfolio_health  — whole-portfolio aggregate stats

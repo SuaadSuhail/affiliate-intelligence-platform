@@ -64,7 +64,7 @@ def test_chunk_text_overlap():
     )
 
 
-# ─── Test 4: embed_communication creates correct chunks in ChromaDB ───────────
+# ─── Test 4: embed_communication creates correct chunks in the vector store ───
 
 def test_embed_communication_chunk_count():
     """

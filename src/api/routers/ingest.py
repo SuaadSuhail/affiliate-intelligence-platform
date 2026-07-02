@@ -3,7 +3,7 @@ Ingestion Router
 ================
 Endpoints that trigger data ingestion from mock files or CSV uploads.
 
-POST /ingest/full           — run full ETL (affiliates + comms + ChromaDB profiles)
+POST /ingest/full           — run full ETL (affiliates + comms + pgvector embeddings)
 POST /ingest/affiliates     — re-ingest affiliates CSV only
 POST /ingest/communications — re-ingest emails.txt + transcripts.txt
 POST /ingest/csv            — upload a CSV file of affiliates
@@ -47,7 +47,7 @@ def _run_ingest_full_task(task_id: str) -> None:
 async def ingest_full(background_tasks: BackgroundTasks) -> dict:
     """
     Run the complete ETL pipeline in the background.
-    Steps: affiliates.csv → emails.txt → transcripts.txt → ChromaDB profiles.
+    Steps: affiliates.csv → emails.txt → transcripts.txt → pgvector embeddings.
     Returns immediately with a task_id. Poll GET /task/{task_id} for status.
     """
     task_id = str(uuid4())

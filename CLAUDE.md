@@ -1100,3 +1100,14 @@ pytest tests/ -v → 24/24 passed
 - **Communications outside the 30-day window** (Tom's comms at 40d and 45d) contribute to `days_since_contact` and `ctr_trend_pct` churn signals but NOT to `churn_signal_count` or `competitor_mention_count` (which only count 30-day window comms). The `comm_count_30d == 0` rule (+0.15) still fires for Tom.
 - **Rule-based scoring is primary** (`score_updater.py` calls `calculate_churn_risk_rules` / `calculate_growth_potential_rules` directly). XGBoost is trained and available for `predict_churn_risk` / `predict_growth_potential` calls (e.g. explainability) but not used in the score update loop — with 10 samples it produces near-identical predictions for all affiliates.
 - **Bug fixed** (`src/api/main.py` `AffiliateOut.from_orm`): `a.churn_risk_score or 0.5` replaced with `a.churn_risk_score if a.churn_risk_score is not None else 0.5` — the `or` form treats `0.0` as falsy and incorrectly returns `0.5` for affiliates with zero churn risk.
+
+---
+
+## 15. Known issues
+
+- **`Embedding` model missing from `alembic/env.py` explicit import** — `env.py` imports
+  `Affiliate`, `Communication`, `ScoreHistory`, `LeakedCode` by name to ensure they are
+  registered on `Base.metadata` before autogenerate runs, but `Embedding` is absent.
+  Alembic autogenerate may silently miss schema changes to the `embeddings` table.
+  Pre-existing gap, unrelated to the promo leakage detector work. Needs its own fix on a
+  separate branch.

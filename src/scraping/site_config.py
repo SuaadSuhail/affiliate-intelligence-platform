@@ -40,9 +40,13 @@ SITES: list[SiteConfig] = [
     ),
     SiteConfig(
         name="csr-shell-mock",
-        kind="fixture",
+        # kind="live" even though this is a local file: fetch_html(kind="fixture")
+        # reads the file directly without a browser, which would return only the empty
+        # <div id="app"></div> shell. Playwright can navigate file:// URLs just as well
+        # as http:// ones, so kind="live" routes this through the browser render path
+        # where csr_shell_mock.js executes and injects CSRLEAK99 into #app.
+        kind="live",
         url=(FIXTURES_DIR / "csr_shell_mock.html").as_uri(),
-        # JS injects the same .voucher-card/.voucher-code structure as voucherslug
         code_selectors=["#app .voucher-card .voucher-code"],
         merchant_selectors=["#app .voucher-card .merchant-name"],
     ),

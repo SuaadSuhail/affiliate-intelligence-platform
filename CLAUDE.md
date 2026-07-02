@@ -1111,3 +1111,14 @@ pytest tests/ -v → 24/24 passed
   Alembic autogenerate may silently miss schema changes to the `embeddings` table.
   Pre-existing gap, unrelated to the promo leakage detector work. Needs its own fix on a
   separate branch.
+
+- **`test_update_all_scores_updates_affiliates` fails** — patches
+  `src.ml.score_updater.predict_churn_risk`, a symbol no longer imported at module
+  level in `score_updater.py` after the rule-based scoring refactor. Stale test, needs
+  updating to match current `score_updater.py`. Confirmed pre-existing on `develop`,
+  unrelated to the promo leakage detector work.
+
+- **`test_get_shap_explanation_structure` segfaults on macOS** — XGBoost loaded via joblib
+  inside the pytest process triggers a dylib conflict, same root cause already noted
+  elsewhere in this file for the uvicorn context. Confirmed pre-existing on `develop`,
+  unrelated to the promo leakage detector work.

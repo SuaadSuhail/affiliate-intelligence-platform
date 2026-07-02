@@ -163,6 +163,9 @@ async def startup_event() -> None:
     routes = [r.path for r in app.routes if hasattr(r, "path")]
     logger.info("Application startup complete", extra={"routes_registered": len(routes)})
 
+    from src.scheduling.jobs import start_scheduler
+    start_scheduler()
+
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────
 

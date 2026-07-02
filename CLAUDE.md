@@ -1317,3 +1317,8 @@ pytest tests/ -v → 24/24 passed
   inside the pytest process triggers a dylib conflict, same root cause already noted
   elsewhere in this file for the uvicorn context. Confirmed pre-existing on `develop`,
   unrelated to the promo leakage detector work.
+
+- **README Getting Started steps 4-5 are inconsistent** — step 4 (`docker compose up -d`)
+  already starts the `app` service on port 8080; the step 5 alternative local `uvicorn`
+  path would then hit a port conflict if both are followed in sequence as written.
+  Pre-existing, unrelated to the promo leakage detector work.

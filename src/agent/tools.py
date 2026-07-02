@@ -1,7 +1,7 @@
 """
 LangChain Tool Definitions
 ==========================
-Five tools for the ReAct agent. Each docstring is used by LangChain
+Six tools for the ReAct agent. Each docstring is used by LangChain
 to decide when to call the tool — keep them descriptive.
 
 Tools
@@ -11,6 +11,7 @@ Tools
 3. get_affiliate_summary — full profile for one affiliate
 4. draft_email           — LLM-generated personalised email draft
 5. get_portfolio_health  — whole-portfolio aggregate stats
+6. check_promo_leakage   — live leakage scan for one affiliate's promo code
 """
 
 from __future__ import annotations

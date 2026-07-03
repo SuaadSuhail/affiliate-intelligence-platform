@@ -1316,7 +1316,11 @@ pytest tests/ -v → 24/24 passed
 - **`test_get_shap_explanation_structure` segfaults on macOS** — XGBoost loaded via joblib
   inside the pytest process triggers a dylib conflict, same root cause already noted
   elsewhere in this file for the uvicorn context. Confirmed pre-existing on `develop`,
-  unrelated to the promo leakage detector work.
+  unrelated to the promo leakage detector work. Re-tested 2026-07-03: passed cleanly
+  across 5 separate isolated runs with no segfault, suggesting this is
+  intermittent/non-deterministic rather than a consistent failure. Not marked resolved
+  — root cause (macOS XGBoost/joblib dylib conflict) has not been fixed, only observed
+  to not always reproduce.
 
 - **README Getting Started steps 4-5 are inconsistent** — step 4 (`docker compose up -d`)
   already starts the `app` service on port 8080; the step 5 alternative local `uvicorn`

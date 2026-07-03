@@ -114,13 +114,14 @@ def test_update_all_scores_updates_affiliates():
         a = Affiliate()
         a.id = uuid.uuid4()
         a.name = "Test"
-        a.email = f"{uuid.uuid4()}@test.com"
-        a.tier = "silver"
-        a.monthly_revenue = 5000.0
+        a.status = "active"
         a.churn_risk_score = churn
         a.growth_potential_score = growth
         a.health_score = 60.0
-        a.last_contact_date = datetime.now(timezone.utc)
+        a.revenue_30d = 5000.0
+        a.ctr_trend_pct = 0.0
+        a.last_contact_at = datetime.now(timezone.utc)
+        a.days_since_contact = 0
         return a
 
     aff1 = _make_aff(churn=0.3, growth=0.7)
@@ -143,8 +144,8 @@ def test_update_all_scores_updates_affiliates():
     mock_db.add = MagicMock()
 
     with patch("src.ml.score_updater.build_feature_vector") as mock_fv, \
-         patch("src.ml.score_updater.predict_churn_risk") as mock_churn, \
-         patch("src.ml.score_updater.predict_growth_potential") as mock_growth:
+         patch("src.ml.score_updater.calculate_churn_risk_rules") as mock_churn, \
+         patch("src.ml.score_updater.calculate_growth_potential_rules") as mock_growth:
 
         mock_fv.return_value = {f: 0.0 for f in [
             "days_since_contact", "revenue_30d", "ctr_trend_pct",

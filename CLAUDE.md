@@ -1300,13 +1300,6 @@ pytest tests/ -v → 24/24 passed
 
 ## 15. Known issues
 
-- **`Embedding` model missing from `alembic/env.py` explicit import** — `env.py` imports
-  `Affiliate`, `Communication`, `ScoreHistory`, `LeakedCode` by name to ensure they are
-  registered on `Base.metadata` before autogenerate runs, but `Embedding` is absent.
-  Alembic autogenerate may silently miss schema changes to the `embeddings` table.
-  Pre-existing gap, unrelated to the promo leakage detector work. Needs its own fix on a
-  separate branch.
-
 - **`test_get_shap_explanation_structure` segfaults on macOS** — XGBoost loaded via joblib
   inside the pytest process triggers a dylib conflict, same root cause already noted
   elsewhere in this file for the uvicorn context. Confirmed pre-existing on `develop`,

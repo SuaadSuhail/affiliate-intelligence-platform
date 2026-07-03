@@ -176,7 +176,7 @@ affiliate-intelligence-platform/
 git clone https://github.com/SuaadSuhail/affiliate-intelligence-platform.git
 cd affiliate-intelligence-platform
 
-# 2. Create the Python environment
+# 2. Create the Python environment (used for tests, Alembic CLI, and other local tooling)
 conda create -n affiliate-intelligence python=3.11
 conda activate affiliate-intelligence
 pip install -r requirements.txt
@@ -187,13 +187,16 @@ playwright install chromium
 cp .env.example .env
 # Open .env and set OPENAI_API_KEY=sk-...
 
-# 4. Start the infrastructure
+# 4. Start everything with Docker Compose
 docker compose up -d
-# PostgreSQL → :5432  |  ChromaDB → :8001
-
-# 5. Start the API server
-uvicorn src.api.main:app --port 8080 --reload
+# PostgreSQL → :5432  |  API → :8080 (auto-reloads on src/ changes via bind mount)
 ```
+
+Docker Compose is the only supported way to run the API server — the `app` service
+already mounts `./src` with `--reload`, so code changes take effect without a rebuild
+or restart. Running `uvicorn` locally against the same port will conflict with the
+Docker container; the conda environment above is for running tests and Alembic CLI
+commands, not for serving the API.
 
 ### Run the Data Pipeline
 

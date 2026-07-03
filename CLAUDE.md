@@ -1300,23 +1300,14 @@ pytest tests/ -v → 24/24 passed
 
 ## 15. Known issues
 
-- **`Embedding` model missing from `alembic/env.py` explicit import** — `env.py` imports
-  `Affiliate`, `Communication`, `ScoreHistory`, `LeakedCode` by name to ensure they are
-  registered on `Base.metadata` before autogenerate runs, but `Embedding` is absent.
-  Alembic autogenerate may silently miss schema changes to the `embeddings` table.
-  Pre-existing gap, unrelated to the promo leakage detector work. Needs its own fix on a
-  separate branch.
-
-- **`test_update_all_scores_updates_affiliates` fails** — patches
-  `src.ml.score_updater.predict_churn_risk`, a symbol no longer imported at module
-  level in `score_updater.py` after the rule-based scoring refactor. Stale test, needs
-  updating to match current `score_updater.py`. Confirmed pre-existing on `develop`,
-  unrelated to the promo leakage detector work.
-
 - **`test_get_shap_explanation_structure` segfaults on macOS** — XGBoost loaded via joblib
   inside the pytest process triggers a dylib conflict, same root cause already noted
   elsewhere in this file for the uvicorn context. Confirmed pre-existing on `develop`,
-  unrelated to the promo leakage detector work.
+  unrelated to the promo leakage detector work. Re-tested 2026-07-03: passed cleanly
+  across 5 separate isolated runs with no segfault, suggesting this is
+  intermittent/non-deterministic rather than a consistent failure. Not marked resolved
+  — root cause (macOS XGBoost/joblib dylib conflict) has not been fixed, only observed
+  to not always reproduce.
 
 - **README Getting Started steps 4-5 are inconsistent** — step 4 (`docker compose up -d`)
   already starts the `app` service on port 8080; the step 5 alternative local `uvicorn`

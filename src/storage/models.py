@@ -191,6 +191,13 @@ class Embedding(Base):
 
     __table_args__ = (
         Index("ix_embeddings_affiliate_id", "affiliate_id"),
+        Index(
+            "embeddings_vector_idx",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"lists": "10"},
+        ),
     )
 
     def __repr__(self) -> str:

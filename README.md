@@ -6,7 +6,7 @@ An agentic AI system that produces a **360° health score** for every affiliate 
 
 ## Demo
 
-The agent chains five tools — SQL query, semantic search, affiliate profile, email drafting, and portfolio stats — to answer complex questions in a single response.
+The agent chains six tools — SQL query, semantic search, affiliate profile, email drafting, and portfolio stats — to answer complex questions in a single response.
 
 **"Which affiliates need urgent attention?"**
 ```
@@ -67,19 +67,19 @@ Tools used: get_affiliate_summary, draft_email
 │     ChromaDB  (384-dim communication embeddings)         │
 └────────────────────────┬────────────────────────────────┘
                          │
-          ┌──────────────┴──────────────┐
-          │                             │
-┌─────────▼──────────┐   ┌─────────────▼──────────────────┐
-│  4. ML Prediction  │   │  5. Agentic AI Core             │
-│  XGBoost churn +   │   │  LangChain ReAct agent          │
-│  growth models     │   │  5 tools · gpt-4o-mini          │
-│  SHAP explanations │   │  conversation history           │
-└─────────┬──────────┘   └─────────────┬──────────────────┘
-          │                             │
-          └──────────────┬──────────────┘
+          ┌──────────────┴───────────┬──────────────────────────┐
+          │                          │                          │
+┌─────────▼──────────┐   ┌───────────▼──────────┐   ┌───────────▼───────────┐
+│  4. ML Prediction  │   │  5. Leakage Detector │   │  6. Agentic AI Core   │
+│  XGBoost churn +   │   │  Playwright scrape + │   │  LangChain ReAct agent│
+│  growth models     │   │  code match · persist│   │  6 tools · gpt-4o-mini│
+│  SHAP explanations │   │  nightly + on-demand │   │  conversation history │
+└─────────┬──────────┘   └───────────┬──────────┘   └───────────┬───────────┘
+          │                          │                          │
+          └──────────────┬───────────┴──────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────┐
-│  6. API & Frontend                                       │
+│  7. API & Frontend                                       │
 │     FastAPI (21 endpoints) · chat UI · portfolio panel   │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -99,6 +99,9 @@ Tools used: get_affiliate_summary, draft_email
 | Database | PostgreSQL, SQLAlchemy ORM |
 | Infrastructure | Docker, Docker Compose |
 | Frontend | Vanilla HTML / CSS / JS (no framework) |
+| Web scraping | Playwright (headless Chromium) |
+| HTML parsing | BeautifulSoup4, lxml |
+| Scheduling | APScheduler |
 | Testing | pytest |
 
 ---
@@ -109,7 +112,8 @@ Tools used: get_affiliate_summary, draft_email
 - **21-tag NLP classification** — each communication is tagged across four groups (engagement, sentiment, intent, relationship) using spaCy NER plus a 40-word custom sentiment lexicon
 - **Semantic search** — ChromaDB embedding search over all email and call transcript content; returns the most semantically relevant communications for any natural-language query
 - **SHAP explainability** — every XGBoost prediction includes top-5 SHAP feature importances identifying the specific drivers of churn risk or growth potential for each affiliate
-- **ReAct agent with 5 tools** — the LangChain agent autonomously decides which tools to call, chains multiple results together, and produces a coherent answer with source attribution
+- **ReAct agent with 6 tools** — the LangChain agent autonomously decides which tools to call, chains multiple results together, and produces a coherent answer with source attribution
+- **Promo code leakage detection** — scheduled (nightly) and on-demand scans of monitored voucher sites for unauthorised use of affiliate promo codes, with every match linked to its source URL as evidence
 - **Browser chat interface** — two-panel UI with live portfolio stats, affiliate health bars, conversation history, tools-used attribution, and suggested questions
 
 ---
@@ -121,10 +125,10 @@ affiliate-intelligence-platform/
 ├── src/
 │   ├── agent/
 │   │   ├── agent.py            ← LangGraph ReAct agent, run_agent()
-│   │   └── tools.py            ← 5 tool definitions (@tool decorated)
+│   │   └── tools.py            ← 6 tool definitions (@tool decorated)
 │   ├── api/
 │   │   ├── main.py             ← FastAPI app, router wiring, GET /
-│   │   ├��─ routers/            ← ingest, process, search, ml, agent
+│   │   ├── routers/            ← ingest, process, search, ml, agent, leakage
 │   │   ├── templates/          ← Jinja2 chat interface (index.html)
 │   │   └── static/             ← CSS and static assets
 │   ├── ingestion/
@@ -137,8 +141,16 @@ affiliate-intelligence-platform/
 │   │   ├── growth_model.py     ← XGBoost growth + rule-based fallback
 │   │   ├── explainability.py   ← SHAP TreeExplainer, top-5 factors
 │   │   └── score_updater.py    ← daily scoring pipeline, score_history
+│   ├── scheduling/
+│   │   └── jobs.py             ← APScheduler nightly leakage scan (cron 03:00 UTC)
+│   ├── scraping/
+│   │   ├── site_config.py      ← SiteConfig registry (fixture + live sites)
+│   │   ├── fetcher.py          ← Playwright fetch, robots.txt + rate limiting
+│   │   ├── extractor.py        ← selector + regex candidate code extraction
+│   │   ├── leakage_scraper.py  ← check_leakage() orchestrator, dedup window
+│   │   └── fixtures/           ← offline HTML/JS fixtures for safe demo scans
 │   └── storage/
-│       ├── models.py           ← SQLAlchemy ORM models
+│       ├── models.py           ← SQLAlchemy ORM models (+ LeakedCode)
 │       ├── database.py         ← engine, session factory, get_db()
 │       └── vector_store.py     ← ChromaDB wrapper, add/search
 ├── data/mock/                  ← 10 affiliate profiles, 7 communications
@@ -169,6 +181,7 @@ conda create -n affiliate-intelligence python=3.11
 conda activate affiliate-intelligence
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
+playwright install chromium
 
 # 3. Configure environment variables
 cp .env.example .env

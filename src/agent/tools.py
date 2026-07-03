@@ -1,7 +1,7 @@
 """
 LangChain Tool Definitions
 ==========================
-Five tools for the ReAct agent. Each docstring is used by LangChain
+Six tools for the ReAct agent. Each docstring is used by LangChain
 to decide when to call the tool — keep them descriptive.
 
 Tools
@@ -11,6 +11,7 @@ Tools
 3. get_affiliate_summary — full profile for one affiliate
 4. draft_email           — LLM-generated personalised email draft
 5. get_portfolio_health  — whole-portfolio aggregate stats
+6. check_promo_leakage   — live leakage scan for one affiliate's promo code
 """
 
 from __future__ import annotations
@@ -366,6 +367,73 @@ def get_portfolio_health(input_str: str = "") -> str:
         db.close()
 
 
+# ─── Tool 6: check_promo_leakage ─────────────────────────────────────────────
+
+@tool
+def check_promo_leakage(affiliate_id: str) -> str:
+    """Check whether a specific affiliate's promo code has leaked onto any
+    monitored voucher or deal site right now.
+    Use this when a user asks whether an affiliate's code is being shared
+    without authorisation, or to verify leakage before a retention call.
+    Runs a live scan immediately rather than waiting for the nightly scheduled
+    job — useful when the answer is needed in real time.
+    Input must be the affiliate's UUID (not their name).
+    To get the UUID first, use query_database:
+      SELECT id, name FROM affiliates WHERE name ILIKE '%<name>%'"""
+    from src.storage.database import SessionLocal
+    from src.scraping.leakage_scraper import check_leakage
+
+    db = SessionLocal()
+    try:
+        result = check_leakage(db, scan_type="on_demand", affiliate_id=affiliate_id)
+    except Exception as exc:
+        logger.error(
+            "check_promo_leakage tool failed",
+            extra={"affiliate_id": affiliate_id, "error": str(exc)},
+        )
+        return (
+            "Unable to complete the leakage check right now due to an internal error. "
+            "Please try again or check the server logs for details."
+        )
+    finally:
+        db.close()
+
+    new_leaks = result.get("new_leaks", [])
+    sites_checked = result.get("sites_checked", 0)
+    sites_failed = result.get("sites_failed", [])
+
+    if new_leaks:
+        lines = [
+            f"⚠️  Promo code leakage detected across {len(new_leaks)} site(s):\n"
+        ]
+        for leak in new_leaks:
+            lines.append(
+                f"  • Code: {leak['code']}\n"
+                f"    Site: {leak['site']}\n"
+                f"    URL:  {leak['source_url']}\n"
+                f"    Found at: {leak['found_at']}"
+            )
+        if sites_failed:
+            failed_names = ", ".join(e["site"] for e in sites_failed)
+            lines.append(
+                f"\n  Note: {len(sites_failed)} site(s) could not be scanned "
+                f"({failed_names}) — leakage there is unknown."
+            )
+        return "\n".join(lines)
+
+    msg = (
+        f"No leakage detected. {sites_checked} site(s) were successfully scanned "
+        f"and none listed this affiliate's promo code."
+    )
+    if sites_failed:
+        failed_names = ", ".join(e["site"] for e in sites_failed)
+        msg += (
+            f" However, {len(sites_failed)} site(s) could not be scanned "
+            f"({failed_names}) — leakage there cannot be confirmed."
+        )
+    return msg
+
+
 # Expose tools list for agent setup
 TOOLS = [
     query_database,
@@ -373,4 +441,5 @@ TOOLS = [
     get_affiliate_summary,
     draft_email,
     get_portfolio_health,
+    check_promo_leakage,
 ]

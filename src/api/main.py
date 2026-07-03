@@ -61,6 +61,7 @@ from src.api.routers.search import router as search_router
 from src.api.routers.ml import router as ml_router
 from src.api.routers.agent import router as agent_router
 from src.api.routers.admin import router as admin_router
+from src.api.routers.leakage import router as leakage_router
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -134,6 +135,7 @@ app.include_router(search_router, tags=["Search"])
 app.include_router(ml_router, prefix="/ml", tags=["ML"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 app.include_router(admin_router)
+app.include_router(leakage_router, prefix="/leakage", tags=["Leakage"])
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -162,6 +164,9 @@ async def startup_event() -> None:
 
     routes = [r.path for r in app.routes if hasattr(r, "path")]
     logger.info("Application startup complete", extra={"routes_registered": len(routes)})
+
+    from src.scheduling.jobs import start_scheduler
+    start_scheduler()
 
 
 # ─── Frontend ─────────────────────────────────────────────────────────────────

@@ -202,11 +202,15 @@ def test_check_leakage_end_to_end_writes_expected_rows():
 
         result = check_leakage(db, scan_type="on_demand")
 
-        # Return dict assertions
-        assert len(result["new_leaks"]) == 1, (
-            f"Expected 1 new_leak, got {len(result['new_leaks'])}: {result['new_leaks']}"
+        # Filter to this test's own affiliate — the DB may have other
+        # affiliates with a real active_promo_code too (the demo seed:
+        # Rachel Torres / Marcus Williams, see data/mock/affiliates.csv),
+        # so global new_leaks is no longer guaranteed to be just this one.
+        own_leaks = [l for l in result["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+        assert len(own_leaks) == 1, (
+            f"Expected 1 new_leak for this affiliate, got {len(own_leaks)}: {own_leaks}"
         )
-        leak = result["new_leaks"][0]
+        leak = own_leaks[0]
         assert leak["affiliate_id"] == str(aff.id)
         assert leak["code"] == "TESTLEAK20"
         assert leak["site"] == "voucherslug-mock"
@@ -230,7 +234,24 @@ def test_check_leakage_end_to_end_writes_expected_rows():
                 LeakedCode.affiliate_id == aff.id,
                 LeakedCode.code == "TESTLEAK20",
             ).delete(synchronize_session=False)
+            # check_leakage()'s has_active_leak recompute is a bulk
+            # Query.update(synchronize_session=False), which bypasses the
+            # ORM — this session's cached aff object is stale until
+            # refreshed. Refresh FIRST, before making any reassignment below:
+            # refresh() overwrites in-memory attributes with the current DB
+            # row, discarding any not-yet-flushed pending changes — refreshing
+            # in between two assignments (rather than before both) would
+            # silently drop the first one.
+            db.refresh(aff)
             aff.active_promo_code = original_code
+            # Recompute has_active_leak now that this test's row is gone —
+            # check_leakage() set it True during the test; leaving it stuck
+            # True with zero underlying leaked_codes rows would be exactly
+            # the kind of "points nowhere" inconsistency Phase 5A's
+            # referential-integrity tests exist to catch elsewhere.
+            aff.has_active_leak = (
+                db.query(LeakedCode).filter(LeakedCode.affiliate_id == aff.id).count() > 0
+            )
             db.commit()
         db.close()
 
@@ -262,11 +283,16 @@ def test_check_leakage_dedup_window_prevents_duplicate():
         result1 = check_leakage(db, scan_type="on_demand")
         result2 = check_leakage(db, scan_type="on_demand")
 
-        assert len(result1["new_leaks"]) == 1, (
-            f"Run 1: expected 1 new_leak, got {len(result1['new_leaks'])}"
-        )
-        assert len(result2["new_leaks"]) == 0, (
-            f"Run 2: expected 0 new_leaks (dedup window), got {len(result2['new_leaks'])}"
+        # Filter to this test's own affiliate — the DB may have other
+        # affiliates with a real active_promo_code too (the demo seed:
+        # Rachel Torres / Marcus Williams), so global new_leaks is no longer
+        # guaranteed to be just this one.
+        own1 = [l for l in result1["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+        own2 = [l for l in result2["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+
+        assert len(own1) == 1, f"Run 1: expected 1 new_leak for this affiliate, got {len(own1)}"
+        assert len(own2) == 0, (
+            f"Run 2: expected 0 new_leaks for this affiliate (dedup window), got {len(own2)}"
         )
 
         count = db.query(LeakedCode).filter(
@@ -281,7 +307,18 @@ def test_check_leakage_dedup_window_prevents_duplicate():
                 LeakedCode.affiliate_id == aff.id,
                 LeakedCode.code == "TESTLEAK20",
             ).delete(synchronize_session=False)
+            # check_leakage()'s recompute uses Query.update(synchronize_session=False)
+            # — a bulk UPDATE that bypasses the ORM, so this session's cached aff
+            # object is now stale. Refresh FIRST, before either reassignment below:
+            # refresh() overwrites in-memory attributes with the current DB row,
+            # discarding any not-yet-flushed pending changes — refreshing in
+            # between the two assignments (rather than before both) would
+            # silently drop the first one.
+            db.refresh(aff)
             aff.active_promo_code = original_code
+            aff.has_active_leak = (
+                db.query(LeakedCode).filter(LeakedCode.affiliate_id == aff.id).count() > 0
+            )
             db.commit()
         db.close()
 
@@ -348,6 +385,190 @@ def test_check_leakage_isolates_site_failures():
                 LeakedCode.affiliate_id == aff.id,
                 LeakedCode.code == "TESTLEAK20",
             ).delete(synchronize_session=False)
+            # check_leakage()'s recompute uses Query.update(synchronize_session=False)
+            # — a bulk UPDATE that bypasses the ORM, so this session's cached aff
+            # object is now stale. Refresh FIRST, before either reassignment below:
+            # refresh() overwrites in-memory attributes with the current DB row,
+            # discarding any not-yet-flushed pending changes — refreshing in
+            # between the two assignments (rather than before both) would
+            # silently drop the first one.
+            db.refresh(aff)
+            aff.active_promo_code = original_code
+            aff.has_active_leak = (
+                db.query(LeakedCode).filter(LeakedCode.affiliate_id == aff.id).count() > 0
+            )
+            db.commit()
+
+
+# ─── (i) check_leakage: writes an audit_log entry even with zero leaks ────────
+
+def test_check_leakage_writes_audit_entry_even_with_zero_leaks():
+    """
+    check_leakage must write one audit_log entry per affiliate in scope
+    (stage='signals', rule_or_tool='check_leakage') — even when zero leaks
+    are found, so "checked and found nothing" is on record too.
+    Requires a live PostgreSQL database.
+    """
+    from src.storage.database import SessionLocal
+    from src.storage.models import Affiliate, AuditLog
+    from src.scraping.leakage_scraper import check_leakage
+
+    db = SessionLocal()
+    aff = None
+    original_code = None
+    try:
+        aff = db.query(Affiliate).order_by(Affiliate.name).first()
+        if aff is None:
+            pytest.skip("No affiliates in DB — run POST /ingest/full first")
+
+        original_code = aff.active_promo_code
+        # Guaranteed not to appear in any fixture — exercises the
+        # "checked and found nothing" path specifically.
+        aff.active_promo_code = "NO-SUCH-LEAK-CODE-XYZ"
+        db.flush()
+
+        result = check_leakage(db, scan_type="on_demand")
+        # Filter to this test's own affiliate — the DB may have other
+        # affiliates with a real active_promo_code too (the demo seed:
+        # Rachel Torres / Marcus Williams), so global new_leaks is no longer
+        # guaranteed to be zero.
+        own_leaks = [l for l in result["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+        assert len(own_leaks) == 0
+
+        entry = (
+            db.query(AuditLog)
+            .filter(
+                AuditLog.record_id == aff.id,
+                AuditLog.rule_or_tool == "check_leakage",
+            )
+            .order_by(AuditLog.timestamp.desc())
+            .first()
+        )
+        assert entry is not None
+        assert entry.stage == "signals"
+        assert entry.record_type == "affiliate"
+        assert entry.input_snapshot["scan_type"] == "on_demand"
+        assert isinstance(entry.input_snapshot["sites_checked"], list)
+        assert len(entry.input_snapshot["sites_checked"]) == 3  # 3 fixture sites
+        assert entry.output_snapshot == {"leaks_found": 0, "codes": []}
+
+        # Referential sanity: record_id must resolve to a real affiliates row
+        # — a regression check for a future bug writing an audit entry that
+        # points nowhere. Not a schema constraint (record_type stays
+        # polymorphic by design), just a check on this specific wiring point.
+        resolved = db.query(Affiliate).filter(Affiliate.id == entry.record_id).first()
+        assert resolved is not None, (
+            f"audit_log record_id {entry.record_id} does not exist in affiliates"
+        )
+        assert resolved.id == aff.id
+    finally:
+        if aff is not None:
+            db.query(AuditLog).filter(
+                AuditLog.record_id == aff.id,
+                AuditLog.rule_or_tool == "check_leakage",
+            ).delete(synchronize_session=False)
             aff.active_promo_code = original_code
             db.commit()
         db.close()
+
+
+# ─── (j) has_active_leak: flips true on a leak, stays true on a clean rescan ──
+
+def test_has_active_leak_flips_true_and_stays_true_on_clean_rescan():
+    """
+    Real DB: affiliates.has_active_leak starts False for a clean affiliate,
+    flips True after a scan finds a leak, and stays True on a subsequent scan
+    that finds nothing new for it — this is the "has ever had a leak on
+    record" definition (see src.scraping.leakage_scraper module docstring for
+    the judgment call: no resolution/expiry workflow exists yet, so the flag
+    does not go back to False on its own).
+    """
+    from src.storage.database import SessionLocal
+    from src.storage.models import Affiliate, AuditLog, LeakedCode
+    from src.scraping.leakage_scraper import check_leakage
+
+    db = SessionLocal()
+    aff = None
+    original_code = None
+    original_flag = None
+    try:
+        aff = db.query(Affiliate).order_by(Affiliate.name).first()
+        if aff is None:
+            pytest.skip("No affiliates in DB — run POST /ingest/full first")
+
+        original_code = aff.active_promo_code
+        original_flag = aff.has_active_leak
+
+        # Force a genuinely clean starting state for this affiliate.
+        db.query(LeakedCode).filter(LeakedCode.affiliate_id == aff.id).delete(
+            synchronize_session=False
+        )
+        aff.has_active_leak = False
+        aff.active_promo_code = "TESTLEAK20"  # matches voucherslug-mock fixture
+        db.commit()
+
+        # Filter to this test's own affiliate — the DB may have other
+        # affiliates with a real active_promo_code too (the demo seed:
+        # Rachel Torres / Marcus Williams), so global new_leaks is no longer
+        # guaranteed to be just this one.
+        result1 = check_leakage(db, scan_type="on_demand")
+        own1 = [l for l in result1["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+        assert len(own1) == 1
+
+        db.refresh(aff)
+        assert aff.has_active_leak is True
+
+        # Second scan: the dedup window means no NEW leaked_codes row, but the
+        # existing one must keep the flag True — recompute must look at the
+        # full table, not just this run's new_leaks.
+        result2 = check_leakage(db, scan_type="on_demand")
+        own2 = [l for l in result2["new_leaks"] if l["affiliate_id"] == str(aff.id)]
+        assert len(own2) == 0
+
+        db.refresh(aff)
+        assert aff.has_active_leak is True
+    finally:
+        if aff is not None:
+            db.query(AuditLog).filter(
+                AuditLog.record_id == aff.id,
+                AuditLog.rule_or_tool == "check_leakage",
+            ).delete(synchronize_session=False)
+            db.query(LeakedCode).filter(
+                LeakedCode.affiliate_id == aff.id,
+                LeakedCode.code == "TESTLEAK20",
+            ).delete(synchronize_session=False)
+            aff.active_promo_code = original_code
+            aff.has_active_leak = original_flag if original_flag is not None else False
+            db.commit()
+        db.close()
+
+
+# ─── (k) has_active_leak: exposed correctly in AffiliateOut ───────────────────
+
+def test_affiliate_out_includes_has_active_leak_for_both_states():
+    """AffiliateOut.from_orm must surface has_active_leak with the correct
+    value for both a leaked and a non-leaked affiliate — not silently
+    dropped from the affiliate-list-facing schema."""
+    import uuid as _uuid
+    from src.api.main import AffiliateOut
+    from src.storage.models import Affiliate
+
+    def _aff(has_leak: bool) -> Affiliate:
+        a = Affiliate()
+        a.id = _uuid.uuid4()
+        a.name = "Test"
+        a.status = "active"
+        a.churn_risk_score = 0.3
+        a.growth_potential_score = 0.5
+        a.health_score = 60.0
+        a.revenue_30d = 1000.0
+        a.days_since_contact = 5
+        a.last_contact_at = None
+        a.has_active_leak = has_leak
+        return a
+
+    leaked_out = AffiliateOut.from_orm(_aff(True))
+    clean_out = AffiliateOut.from_orm(_aff(False))
+
+    assert leaked_out.has_active_leak is True
+    assert clean_out.has_active_leak is False

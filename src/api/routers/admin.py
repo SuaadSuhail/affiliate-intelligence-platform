@@ -5,21 +5,30 @@ Protected endpoints for database administration.
 
 POST /admin/migrate          — run all pending Alembic migrations
 GET  /admin/migration-status — check current migration revision
+GET  /admin/logs             — read recent structured log entries from disk
 
 These endpoints exist so migrations can be triggered manually after
 deployment, without running them automatically on startup (which would
 cause lock contention when multiple instances start simultaneously).
+
+GET /admin/logs is general operational visibility (HTTP requests, pipeline
+steps, errors) — it does NOT replace GET /audit, which stays reserved for
+decision-linked entries (rulebook/signals/approval stages). It reads from the
+file-based log handler configured in src.core.logging_config; a real
+deployment should point at CloudWatch/ELK/Datadog instead of scaling this
+file-based approach further.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from src.api.auth import get_api_key
-from src.core.logging_config import get_logger
+from src.core.logging_config import get_logger, read_log_entries
 
 logger = get_logger(__name__)
 
@@ -64,3 +73,20 @@ def migration_status() -> dict:
         return {"current_revision": current, "status": "ok"}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
+
+
+@router.get("/logs", dependencies=[Depends(get_api_key)])
+def get_logs(
+    level: Optional[str] = Query(None, description="Filter by level, e.g. ERROR, WARNING, INFO"),
+    limit: int = Query(100, ge=1, le=1000, description="Max number of entries to return"),
+    search: Optional[str] = Query(None, description="Case-insensitive substring search over the message field"),
+) -> dict:
+    """
+    Return recent structured log entries (newest first) from the file-based
+    log handler, optionally filtered by level and/or a message substring.
+
+    General operational visibility only — see GET /audit for decision-linked
+    entries (rulebook/signals/approval stages), which this does not replace.
+    """
+    entries = read_log_entries(level=level, search=search, limit=limit)
+    return {"count": len(entries), "entries": entries}

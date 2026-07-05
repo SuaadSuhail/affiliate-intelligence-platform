@@ -10,6 +10,17 @@ Only leaked_codes rows are written here — no churn_risk_score,
 growth_potential_score, health_score, or any other Affiliate scoring field is
 touched. Flag now, numeric integration later: the scoring pipeline can consume
 LeakedCode rows in a separate step once the detection layer is stable.
+
+affiliates.has_active_leak IS updated here, though — it's a storage-layer
+visibility flag (leak signal kept separate from and alongside the scores, not
+folded into them), not a scoring input. "Active" currently means "at least
+one leaked_codes row exists for this affiliate", full stop — there is no
+resolution/expiry workflow anywhere in the system, so once a leak is found
+the flag stays true until someone manually removes the underlying row. See
+the recompute below for the tradeoff this implies.
+
+Also writes one audit_log entry per affiliate scanned (src.audit.log) — even
+when zero leaks are found, so "checked and found nothing" is on record too.
 """
 
 from __future__ import annotations
@@ -19,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from src.audit.log import write_audit_entry
 from src.core.logging_config import get_logger
 from src.scraping.extractor import extract_candidate_codes
 from src.scraping.fetcher import RobotsDisallowedError, fetch_html
@@ -81,7 +93,9 @@ def check_leakage(
     promo codes → deduplicate → persist new LeakedCode rows.
 
     Only leaked_codes rows are written — no churn/growth/health scores are
-    touched. Flag now, numeric integration later.
+    touched. Flag now, numeric integration later. affiliates.has_active_leak
+    IS recomputed per affiliate scanned (see module docstring) — a storage
+    visibility flag, not a scoring input.
 
     Parameters
     ----------
@@ -131,6 +145,7 @@ def check_leakage(
     sites_checked = 0
     sites_failed: list[dict] = []
     new_leaks: list[dict] = []
+    checked_site_names: list[str] = []
 
     for site in SITES:
         # Wrap each site fetch individually — one broken/disallowed site must
@@ -191,6 +206,40 @@ def check_leakage(
             })
 
         sites_checked += 1
+        checked_site_names.append(site.name)
+
+    # Audit trail: one entry per affiliate whose code was part of this scan's
+    # scope, whether or not a leak was found — "checked and found nothing" is
+    # a decision worth recording too, not just "found something".
+    from src.storage.models import Affiliate  # local import, matches module convention
+
+    for aff_id_str in affiliate_codes:
+        aff_leaks = [leak for leak in new_leaks if leak["affiliate_id"] == aff_id_str]
+        write_audit_entry(
+            db,
+            stage="signals",
+            record_type="affiliate",
+            record_id=aff_id_str,
+            rule_or_tool="check_leakage",
+            input_snapshot={"scan_type": scan_type, "sites_checked": checked_site_names},
+            output_snapshot={
+                "leaks_found": len(aff_leaks),
+                "codes": [leak["code"] for leak in aff_leaks],
+            },
+        )
+
+        # Recompute has_active_leak from the FULL leaked_codes table for this
+        # affiliate — not just this run's new_leaks — so the flag stays
+        # accurate for an affiliate whose leak was found in a prior scan and
+        # rediscovers nothing new today (dedup skips re-inserting the row,
+        # but the flag must still reflect that a leak is on record).
+        aff_uuid = uuid.UUID(aff_id_str)
+        has_leak = (
+            db.query(LeakedCode).filter(LeakedCode.affiliate_id == aff_uuid).count() > 0
+        )
+        db.query(Affiliate).filter(Affiliate.id == aff_uuid).update(
+            {"has_active_leak": has_leak}, synchronize_session=False
+        )
 
     db.commit()
 

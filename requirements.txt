@@ -23,8 +23,25 @@ langchain-community>=0.2.0
 openai>=1.30.0
 
 # ─── ML ──────────────────────────────────────────────────────────────────────
-xgboost>=2.0.3
-shap>=0.45.0
+# xgboost and shap are pinned to EXACT, tested-compatible versions — do not
+# loosen back to >= ranges. xgboost>=3.0.0 serializes the model's base_score
+# as a bracketed-scientific-notation string (e.g. "[3E-1]") instead of a
+# plain numeric string; shap's TreeExplainer does `float(base_score)` when
+# loading an XGBoost model and raises
+# "ValueError: could not convert string to float: '[3E-1]'" on construction
+# for any xgboost>=3.0.0 model (shap/shap#4288, shap/shap#4184). shap fixed
+# this in 0.50.0 (shap/shap#4187), but 0.50.0+ requires Python >=3.11 and
+# this project's container runs Python 3.10.12 (pinned via the Playwright
+# base image — see CLAUDE.md) — so upgrading shap is not viable here.
+# xgboost 2.1.4 (latest 2.x) still serializes base_score in the older format
+# shap 0.49.1 (the newest shap release compatible with Python 3.10) can
+# parse — verified directly against this codebase's real models before
+# picking these versions, not assumed from the changelog alone. If this
+# project ever moves to Python >=3.11, shap>=0.50.0 + a current xgboost is
+# the better long-term pairing (upgrade shap rather than keep xgboost
+# pinned backward) — revisit this pin then, not before.
+xgboost==2.1.4
+shap==0.49.1
 scikit-learn>=1.5.0
 
 # ─── Data ────────────────────────────────────────────────────────────────────

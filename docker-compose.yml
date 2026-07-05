@@ -42,6 +42,7 @@ services:
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
       - ./models:/app/models
+      - ./logs:/app/logs
     command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --reload
 volumes:
   postgres_data:

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-import numpy as np
 import pandas as pd
 import shap
 
@@ -25,6 +24,22 @@ ModelType = Literal["churn", "growth"]
 
 _CHURN_FILENAME = "churn_model.pkl"
 _GROWTH_FILENAME = "growth_model.pkl"
+
+# get_shap_explanation()'s "prediction" is always a fresh XGBoost
+# predict_proba() call — a secondary, explainability-only model that is
+# independent of affiliates.churn_risk_score / growth_potential_score (the
+# persisted, rule-based scores that actually drive status/tier/recommend()).
+# The two will generally disagree for the same affiliate; that's expected,
+# not a data-freshness bug — see CLAUDE.md §5's "rule-based primary,
+# XGBoost secondary" design. Every branch below carries this same flag/text
+# so any consumer of this endpoint (not just AffiliateDetail.tsx) gets the
+# disambiguation without relying on frontend copy alone.
+_SECONDARY_MODEL_DESCRIPTION = (
+    "Independent XGBoost model estimate, shown for feature-importance "
+    "insight only. It is not the deterministic score used for "
+    "recommendations, and will generally not match this affiliate's "
+    "churn_risk_score / growth_potential_score."
+)
 
 
 def _load_model(model_type: ModelType):
@@ -57,14 +72,21 @@ def get_shap_explanation(
     Returns
     -------
     {
-        affiliate_id  : str,
-        model_type    : str,
-        base_value    : float,
-        prediction    : float,
-        top_factors   : [
+        affiliate_id        : str,
+        model_type          : str,
+        base_value          : float | None,  # None when explanation_unavailable
+        prediction          : float,  # fresh XGBoost predict_proba() — see
+                                       # is_secondary_model/model_description
+        top_factors         : [
             {feature, shap_value, feature_value, direction},
             ...  top 5 by |shap_value|
-        ]
+        ],
+        explanation_unavailable : bool,
+        is_secondary_model      : bool,  # always True today — this endpoint
+                                          # never reflects the persisted,
+                                          # rule-based churn/growth score
+        model_description       : str,
+        note                    : str | None,
     }
     direction: "increases_risk"/"decreases_risk" (churn)
                "increases_growth"/"decreases_growth" (growth)
@@ -83,13 +105,22 @@ def get_shap_explanation(
         return {
             "affiliate_id": affiliate_id,
             "model_type": model_type,
-            "base_value": 0.0,
+            "base_value": None,
             "prediction": round(pred, 4),
             "top_factors": [],
+            "explanation_unavailable": True,
+            "is_secondary_model": True,
+            "model_description": _SECONDARY_MODEL_DESCRIPTION,
             "note": "SHAP unavailable — model not trained. Run POST /ml/train first.",
         }
 
     X = pd.DataFrame([features])[FEATURE_NAMES].fillna(0)
+
+    # Computed before the SHAP try/except, deliberately: predict_proba() does
+    # not depend on shap.TreeExplainer at all, so a SHAP-specific failure
+    # below must never take a perfectly working prediction down with it —
+    # only the explanation becomes unavailable, not the prediction itself.
+    prediction = float(model.predict_proba(X)[0, 1])
 
     try:
         explainer = shap.TreeExplainer(model)
@@ -102,11 +133,36 @@ def get_shap_explanation(
             shap_row = raw[0]
             base = float(explainer.expected_value)
     except Exception as exc:
-        logger.error("SHAP computation failed", extra={"error": str(exc)})
-        shap_row = np.zeros(len(FEATURE_NAMES))
-        base = 0.0
-
-    prediction = float(model.predict_proba(X)[0, 1])
+        # Do NOT substitute np.zeros()/base=0.0 here — that produces a
+        # response indistinguishable from "every feature genuinely
+        # contributes nothing", which is exactly how a real incompatibility
+        # (shap/xgboost base_score serialization mismatch — see
+        # requirements.txt) went unnoticed and looked like a valid result
+        # for every affiliate. Callers get an explicit, checkable
+        # explanation_unavailable flag instead of plausible-looking fake data.
+        # Kept at ERROR (not downgraded): a genuine SHAP failure after the
+        # Part 1 version fix should now be rare, so it's still worth paging
+        # on, not routine noise.
+        logger.error(
+            "SHAP computation failed — returning explanation_unavailable "
+            "rather than fabricated zero values",
+            extra={
+                "affiliate_id": affiliate_id,
+                "model_type": model_type,
+                "error": str(exc),
+            },
+        )
+        return {
+            "affiliate_id": affiliate_id,
+            "model_type": model_type,
+            "base_value": None,
+            "prediction": round(prediction, 4),
+            "top_factors": [],
+            "explanation_unavailable": True,
+            "is_secondary_model": True,
+            "model_description": _SECONDARY_MODEL_DESCRIPTION,
+            "note": f"SHAP explanation unavailable — computation failed: {exc}",
+        }
 
     if model_type == "churn":
         pos_label, neg_label = "increases_risk", "decreases_risk"
@@ -130,6 +186,9 @@ def get_shap_explanation(
         "base_value": round(base, 6),
         "prediction": round(prediction, 4),
         "top_factors": top_factors,
+        "explanation_unavailable": False,
+        "is_secondary_model": True,
+        "model_description": _SECONDARY_MODEL_DESCRIPTION,
     }
 
 

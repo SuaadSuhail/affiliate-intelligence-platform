@@ -1,11 +1,11 @@
-name,revenue_30d,ctr_trend_pct,days_since_contact,status
-Rachel Torres,58900,3.7,9,high_growth
-Priya Sharma,42100,5.1,10,high_growth
-Sarah Chen,18450,2.4,11,active
-Aiko Tanaka,21300,1.2,13,active
-Fatima Al-Hassan,16800,1.9,12,active
-Nkechi Okonkwo,5400,0.3,15,active
-Carlos Mendez,9750,0.8,17,active
-Marcus Williams,6200,-1.8,23,at_risk
-James O'Brien,1850,-0.5,33,at_risk
-Tom Bauer,980,-4.2,51,churned
+name,revenue_30d,ctr_trend_pct,days_since_contact,status,active_promo_code,tracked_keyword
+Rachel Torres,58900,3.7,9,high_growth,TOMB-EXCL20,rachel torres travel deals
+Priya Sharma,42100,5.1,10,high_growth,,priya sharma discount codes
+Sarah Chen,18450,2.4,11,active,,sarah chen exclusive deals
+Aiko Tanaka,21300,1.2,13,active,,
+Fatima Al-Hassan,16800,1.9,12,active,,
+Nkechi Okonkwo,5400,0.3,15,active,,
+Carlos Mendez,9750,0.8,17,active,,
+Marcus Williams,6200,-1.8,23,at_risk,CSRLEAK99,marcus williams promo codes
+James O'Brien,1850,-0.5,33,at_risk,,
+Tom Bauer,980,-4.2,51,churned,,

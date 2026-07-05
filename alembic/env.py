@@ -12,7 +12,7 @@ from src.storage.database import DATABASE_URL
 from src.storage.models import Base
 
 # Ensure all models are registered on Base.metadata before autogenerate runs
-from src.storage.models import Affiliate, Communication, ScoreHistory, LeakedCode, Embedding  # noqa: F401
+from src.storage.models import Affiliate, Communication, ScoreHistory, LeakedCode, Embedding, ApprovalRequest, AuditLog, SeoSignal  # noqa: F401
 
 config = context.config
 

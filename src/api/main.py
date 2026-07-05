@@ -62,6 +62,9 @@ from src.api.routers.ml import router as ml_router
 from src.api.routers.agent import router as agent_router
 from src.api.routers.admin import router as admin_router
 from src.api.routers.leakage import router as leakage_router
+from src.api.routers.approvals import router as approvals_router
+from src.api.routers.audit import router as audit_router
+from src.api.routers.seo import router as seo_router
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -136,6 +139,9 @@ app.include_router(ml_router, prefix="/ml", tags=["ML"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent"])
 app.include_router(admin_router)
 app.include_router(leakage_router, prefix="/leakage", tags=["Leakage"])
+app.include_router(approvals_router, prefix="/approvals", tags=["Approvals"])
+app.include_router(audit_router, prefix="/audit", tags=["Audit"])
+app.include_router(seo_router, prefix="/seo", tags=["SEO"])
 
 
 # ─── Startup ──────────────────────────────────────────────────────────────────
@@ -189,6 +195,14 @@ class AffiliateOut(BaseModel):
     revenue_30d: float
     days_since_contact: int
     last_contact_at: Optional[str]
+    # Leak signal, kept separate from and visible alongside the scores above —
+    # not folded into status/health_score. See src.scraping.leakage_scraper
+    # for what "active" means (no resolution/expiry workflow exists yet).
+    has_active_leak: bool
+    # SEO signal, same principle: kept separate from and visible alongside
+    # the scores, never fed into categorize()/recommend()'s tier. See
+    # src.seo.analyze.derive_search_trend for how this is computed.
+    search_trend: str
 
     @classmethod
     def from_orm(cls, a: Affiliate) -> "AffiliateOut":
@@ -204,6 +218,8 @@ class AffiliateOut(BaseModel):
             last_contact_at=(
                 a.last_contact_at.isoformat() if a.last_contact_at else None
             ),
+            has_active_leak=bool(a.has_active_leak),
+            search_trend=a.search_trend or "stable",
         )
 
 
@@ -212,6 +228,7 @@ class ScoreHistoryOut(BaseModel):
     churn_risk_score: float
     growth_potential_score: float
     health_score: float
+    evidence_bundle: Optional[list[str]] = None
     scored_at: str
 
     @classmethod
@@ -221,12 +238,16 @@ class ScoreHistoryOut(BaseModel):
             churn_risk_score=s.churn_risk_score,
             growth_potential_score=s.growth_potential_score,
             health_score=s.health_score,
+            evidence_bundle=s.evidence_bundle,
             scored_at=s.scored_at.isoformat() if s.scored_at else "",
         )
 
 
 class AffiliateDetail(AffiliateOut):
     score_history: list[ScoreHistoryOut] = []
+    # Evidence bundle from the most recent score_history row — retrievable
+    # directly on the affiliate, not just by digging into score_history[0].
+    latest_evidence_bundle: Optional[list[str]] = None
 
 
 class ScoreResponse(BaseModel):
@@ -320,6 +341,7 @@ def get_affiliate(
     return AffiliateDetail(
         **AffiliateOut.from_orm(aff).model_dump(),
         score_history=[ScoreHistoryOut.from_orm(s) for s in history],
+        latest_evidence_bundle=history[0].evidence_bundle if history else None,
     )
 
 

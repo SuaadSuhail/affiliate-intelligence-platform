@@ -64,7 +64,7 @@ Tools used: get_affiliate_summary, draft_email
 ┌────────────────────────▼────────────────────────────────┐
 │  3. Storage                                              │
 │     PostgreSQL (affiliates, communications, scores)      │
-│     ChromaDB  (384-dim communication embeddings)         │
+│     pgvector  (384-dim communication embeddings)         │
 └────────────────────────┬────────────────────────────────┘
                          │
           ┌──────────────┴───────────┬──────────────────────────┐
@@ -236,16 +236,20 @@ commands, not for serving the API.
 curl -X POST http://localhost:8080/ingest/full
 
 # Run NLP tagging on all communications
-curl -X POST http://localhost:8080/process/nlp
+curl -X POST http://localhost:8080/process/nlp \
+  -H "X-Api-Key: change-me-in-production"
 
 # Generate and index communication embeddings
-curl -X POST http://localhost:8080/process/embeddings
+curl -X POST http://localhost:8080/process/embeddings \
+  -H "X-Api-Key: change-me-in-production"
 
 # Train churn and growth XGBoost models
-curl -X POST http://localhost:8080/ml/train
+curl -X POST http://localhost:8080/ml/train \
+  -H "X-Api-Key: change-me-in-production"
 
 # Score all affiliates
-curl -X POST http://localhost:8080/ml/score
+curl -X POST http://localhost:8080/ml/score \
+  -H "X-Api-Key: change-me-in-production"
 ```
 
 ### Open the Interface
@@ -284,6 +288,10 @@ all routes with request/response schemas.
 | `POST` | `/agent/chat` | Chat with the ReAct agent (with history) |
 | `POST` | `/agent/quick` | Single-turn agent query |
 | `GET` | `/agent/demo` | Run three preset demo questions |
+| `GET` | `/agent/health` | Check agent status |
+| `POST` | `/admin/migrate` | Run database migrations |
+| `GET` | `/admin/migration-status` | Check migration version |
+| `GET` | `/task/{task_id}` | Poll background task status |
 | `GET` | `/docs` | Interactive Swagger UI |
 
 ---
@@ -379,15 +387,25 @@ alembic history         # show all migrations
 
 ---
 
+## Frontend
+
+The React frontend is in a separate repository:
+https://github.com/SuaadSuhail/affiliate-intelligence-frontend
+
+---
+
 ## Security
 
 All write endpoints require an API key header:
 
 ```
-X-Api-Key: your-secret-key
+X-Api-Key: your-api-key
 ```
 
-Set `API_SECRET_KEY` in your `.env` file. Set `ALLOWED_ORIGINS` to your domain in production.
+Set `API_SECRET_KEY` in your `.env` file.
+Default for local dev: `change-me-in-production`
+
+Set `ALLOWED_ORIGINS` to your domain in production.
 
 In development (`APP_ENV=development`) auth is bypassed automatically.
 

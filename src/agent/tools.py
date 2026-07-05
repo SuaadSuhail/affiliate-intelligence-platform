@@ -11,7 +11,7 @@ get_seo_status, and draft_email below for how that boundary is enforced.
 Tools
 -----
 1. query_database        — raw SQL SELECT against PostgreSQL
-2. semantic_search       — ChromaDB embedding search over communications
+2. semantic_search       — pgvector embedding search over communications
 3. get_affiliate_summary — full profile for one affiliate
 4. draft_email           — composes an email draft and files it for human approval (never sends)
 5. get_portfolio_health  — whole-portfolio aggregate stats

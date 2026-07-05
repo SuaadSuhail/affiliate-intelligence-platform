@@ -21,7 +21,10 @@ import pytest
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def _make_affiliate(name="Test Affiliate", churn=0.4, growth=0.6, health=60.0, days=5):
+def _make_affiliate(
+    name="Test Affiliate", churn=0.4, growth=0.6, health=60.0, days=5,
+    has_active_leak=False, search_trend="stable",
+):
     from src.storage.models import Affiliate
     a = Affiliate()
     a.id = uuid.uuid4()
@@ -34,6 +37,8 @@ def _make_affiliate(name="Test Affiliate", churn=0.4, growth=0.6, health=60.0, d
     a.ctr_trend_pct = 0.0
     a.days_since_contact = days
     a.last_contact_at = datetime.now(timezone.utc)
+    a.has_active_leak = has_active_leak
+    a.search_trend = search_trend
     return a
 
 
@@ -124,6 +129,65 @@ def test_get_affiliate_summary_found():
     assert "72.4" in result or "health" in result.lower()
 
 
+def test_get_affiliate_summary_drivers_use_tagged_history_not_untagged_noise():
+    """
+    Real DB: an affiliate whose single most recent communication is untagged
+    (fresh / not yet NLP-processed) but who has real tagged history further
+    back must still surface that tagged history as churn/growth drivers —
+    not "Insufficient data" — and the summary must flag that more recent,
+    untagged contact exists so a reader isn't misled into thinking there's
+    no recent contact at all. Uses a throwaway affiliate so pre-existing
+    communication history elsewhere in the DB can't affect the assertions.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.agent.tools import get_affiliate_summary
+    from src.storage.database import SessionLocal
+    from src.storage.models import Affiliate, Communication
+
+    db = SessionLocal()
+    aff = None
+    try:
+        aff = Affiliate(name=f"Driver Test Affiliate {uuid.uuid4()}", status="active")
+        db.add(aff)
+        db.flush()
+
+        now = datetime.now(timezone.utc)
+        tagged_old = Communication(
+            affiliate_id=aff.id,
+            source="email",
+            raw_text="We are considering leaving for a competitor platform.",
+            tags=["churn_signal", "competitor_mention"],
+            sentiment_score=-0.5,
+            occurred_at=now - timedelta(days=10),
+        )
+        untagged_new = Communication(
+            affiliate_id=aff.id,
+            source="email",
+            raw_text="Quick fresh note, not yet processed.",
+            tags=[],
+            sentiment_score=0.0,
+            occurred_at=now - timedelta(days=1),
+        )
+        db.add(tagged_old)
+        db.add(untagged_new)
+        db.commit()
+
+        result = get_affiliate_summary.func(aff.name)
+
+        assert "churn_signal" in result
+        assert "competitor_mention" in result
+        assert "hasn't been NLP-tagged yet" in result
+    finally:
+        if aff is not None:
+            db.query(Communication).filter(Communication.affiliate_id == aff.id).delete(
+                synchronize_session=False
+            )
+            db.query(Affiliate).filter(Affiliate.id == aff.id).delete(synchronize_session=False)
+            db.commit()
+        db.close()
+
+
 # ─── Test 4: get_affiliate_summary — not found ───────────────────────────────
 
 def test_get_affiliate_summary_not_found():
@@ -174,6 +238,50 @@ def test_get_portfolio_health_returns_stats():
     assert "2" in result  # total affiliates
     assert "Tom Bauer" in result or "sarah" in result.lower() or "portfolio" in result.lower()
     assert "health" in result.lower()
+
+
+def test_get_portfolio_health_surfaces_leak_and_seo_signals():
+    """
+    get_portfolio_health must expose portfolio-level leak/SEO visibility —
+    not just the churn/growth tier — so a "which affiliates have warning
+    signs" question has all three signal types in view from one tool call.
+    These are counts/names only, deliberately not folded into avg_churn,
+    avg_health, or the tier counts (see src.rulebook.recommend / Tier B).
+    """
+    from src.agent.tools import get_portfolio_health
+    from src.storage.models import ScoreHistory
+
+    affiliates = [
+        _make_affiliate("Marcus Williams", churn=0.60, growth=0.10, health=28.0,
+                         has_active_leak=True, search_trend="declining"),
+        _make_affiliate("Rachel Torres", churn=0.20, growth=1.00, health=88.0,
+                         has_active_leak=True, search_trend="stable"),
+        _make_affiliate("Clean Affiliate", churn=0.10, growth=0.50, health=70.0,
+                         has_active_leak=False, search_trend="stable"),
+    ]
+
+    mock_db = MagicMock()
+
+    def query_side(model):
+        q = MagicMock()
+        if model is ScoreHistory:
+            q.count.return_value = 5
+        else:
+            q.all.return_value = affiliates
+            q.count.return_value = 3
+        return q
+
+    mock_db.query.side_effect = query_side
+
+    with patch("src.agent.tools._get_db", return_value=mock_db):
+        result = get_portfolio_health.invoke("")
+
+    assert "Active promo-code leaks: 2" in result
+    assert "Declining SEO trend:     1" in result
+    assert "Marcus Williams" in result
+    assert "Rachel Torres" in result
+    # Leak/SEO visibility must not silently reword the tier counts above it.
+    assert "not a tier" in result.lower()
 
 
 # ─── Test 6: semantic_search — returns results ───────────────────────────────
@@ -234,3 +342,69 @@ def test_agent_initialises_with_api_key():
 
         agent = agent_mod._get_agent()
         assert agent is not None
+
+
+# ─── Test 8: agent tool list — get_leakage_status in, check_promo_leakage out ──
+
+def test_tools_list_contains_get_leakage_status_not_check_promo_leakage():
+    """The agent's bound tool list (src.agent.tools.TOOLS — what _build_agent()
+    passes straight through to create_react_agent) must offer read-only
+    get_leakage_status and must not offer check_promo_leakage, which used to
+    trigger a live scan + DB write from agent reasoning."""
+    from src.agent import tools as tools_mod
+
+    tool_names = [t.name for t in tools_mod.TOOLS]
+
+    assert "get_leakage_status" in tool_names
+    assert "check_promo_leakage" not in tool_names
+    # Fully removed, not just unbound — nothing should still define it.
+    assert not hasattr(tools_mod, "check_promo_leakage")
+
+
+def test_tools_list_contains_get_seo_status():
+    """The agent's bound tool list must offer read-only get_seo_status —
+    same read-only, no-live-trigger pattern as get_leakage_status."""
+    from src.agent import tools as tools_mod
+
+    tool_names = [t.name for t in tools_mod.TOOLS]
+    assert "get_seo_status" in tool_names
+
+
+# ─── Test 9: no bound tool has a side effect other than draft_email's insert ──
+
+def test_no_bound_tool_has_side_effects_beyond_draft_email_approval_insert():
+    """Static check: none of the agent's bound tools may write to the DB or
+    make a live external call (a scrape, a scan, an SEO check) — except
+    draft_email, which is permitted exactly one DB write (the
+    approval_requests insert filed for human review) and must not itself
+    perform any live external action (no scraping/scanning call, e.g.
+    check_leakage or check_seo)."""
+    import inspect
+
+    from src.agent import tools as tools_mod
+
+    # .execute( is deliberately excluded — query_database legitimately calls
+    # db.execute() for SELECTs, already SELECT-only/keyword-blocked and
+    # covered by test_query_database_rejects_non_select. ORM-level mutation
+    # calls (.add/.commit/.delete) are the actual write signal here.
+    write_markers = (".add(", ".commit(", ".delete(")
+    live_action_markers = (
+        "check_leakage", "check_seo", "requests.", "httpx.", "playwright",
+    )
+
+    for t in tools_mod.TOOLS:
+        source = inspect.getsource(t.func)
+
+        if t.name == "draft_email":
+            assert any(m in source for m in write_markers), (
+                "draft_email is expected to contain the approval_requests insert"
+            )
+            assert not any(m in source for m in live_action_markers), (
+                f"draft_email must not perform a live external action: {source[:200]}"
+            )
+            continue
+
+        found_writes = [m for m in write_markers if m in source]
+        found_live = [m for m in live_action_markers if m in source]
+        assert not found_writes, f"{t.name} must not write to the DB, found: {found_writes}"
+        assert not found_live, f"{t.name} must not perform a live external action, found: {found_live}"

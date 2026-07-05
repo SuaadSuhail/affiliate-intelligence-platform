@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CSR Shell — Mock JS-Rendered Page</title>
+</head>
+<body>
+  <!-- Initial HTML is an empty app shell — no voucher data visible here.
+       A plain HTTP GET returns this file and sees nothing.
+       Playwright executes csr_shell_mock.js, which injects the voucher card. -->
+  <div id="app"></div>
+  <script src="csr_shell_mock.js"></script>
+</body>
+</html>

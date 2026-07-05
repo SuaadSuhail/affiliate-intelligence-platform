@@ -1,31 +1,46 @@
 """
 LangChain Tool Definitions
 ==========================
-Five tools for the ReAct agent. Each docstring is used by LangChain
+Seven tools for the ReAct agent. Each docstring is used by LangChain
 to decide when to call the tool — keep them descriptive.
+
+Every tool here is read-only or draft-only. None may perform a live scan,
+send anything externally, or otherwise act — see get_leakage_status,
+get_seo_status, and draft_email below for how that boundary is enforced.
 
 Tools
 -----
 1. query_database        — raw SQL SELECT against PostgreSQL
 2. semantic_search       — pgvector embedding search over communications
 3. get_affiliate_summary — full profile for one affiliate
-4. draft_email           — LLM-generated personalised email draft
+4. draft_email           — composes an email draft and files it for human approval (never sends)
 5. get_portfolio_health  — whole-portfolio aggregate stats
+6. get_leakage_status     — reads recorded leak findings for one affiliate (no live scan)
+7. get_seo_status         — reads recorded SEO rank signals for one affiliate (no live check)
 """
 
 from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from langchain.tools import tool
 from sqlalchemy import text
 
 from src.core.logging_config import get_logger
+from src.rulebook.recommend import categorize, recommend
 from src.storage.database import SessionLocal
-from src.storage.models import Affiliate, Communication, ScoreHistory
+from src.storage.models import (
+    Affiliate,
+    ApprovalRequest,
+    Communication,
+    LeakedCode,
+    ScoreHistory,
+    SeoSignal,
+)
 
 logger = get_logger(__name__)
 
@@ -188,10 +203,32 @@ def get_affiliate_summary(affiliate_name: str) -> str:
                 f"    \"{snippet}…\""
             )
 
-        # Key risk signals from recent communications (derived from tags)
+        # Key risk signals — pulled from the most recent *tagged* communications
+        # within a 90-day lookback, not just the most recent N regardless of
+        # tag status. `recent_comms` above (used for the raw "Recent
+        # Communications" log) can legitimately be dominated by communications
+        # that haven't been NLP-tagged yet (POST /process/nlp hasn't run
+        # since, or genuinely fresh contact) — using it for drivers too would
+        # silently bury real historical signal under "Insufficient data"
+        # the moment untagged noise fills the top-5 window, which is exactly
+        # what happened before this fix.
+        _DRIVER_LOOKBACK_DAYS = 90
+        driver_cutoff = datetime.now(timezone.utc) - timedelta(days=_DRIVER_LOOKBACK_DAYS)
+        driver_comms = (
+            db.query(Communication)
+            .filter(
+                Communication.affiliate_id == aff.id,
+                Communication.occurred_at >= driver_cutoff,
+                Communication.tags != [],
+            )
+            .order_by(Communication.occurred_at.desc())
+            .limit(5)
+            .all()
+        )
+
         churn_factors: list[str] = []
         growth_factors: list[str] = []
-        for c in recent_comms:
+        for c in driver_comms:
             for tag in (c.tags or []):
                 if tag in ("churn_signal", "competitor_mention", "escalation", "frustrated", "gone_silent"):
                     if tag not in churn_factors:
@@ -200,16 +237,70 @@ def get_affiliate_summary(affiliate_name: str) -> str:
                     if tag not in growth_factors:
                         growth_factors.append(tag)
 
+        # Transparency: if truly nothing tagged exists in the lookback window,
+        # "Insufficient data" is now an honest signal, not a windowing
+        # artifact. But if more recent contact exists and simply hasn't been
+        # tagged yet, say so — otherwise a reader could mistake the drivers
+        # below (based on older tagged data) for "no recent contact at all".
+        driver_staleness_note = None
+        if recent_comms:
+            newest_overall = recent_comms[0]
+            newest_driver_at = driver_comms[0].occurred_at if driver_comms else None
+            if not newest_overall.tags and (
+                newest_driver_at is None or newest_overall.occurred_at > newest_driver_at
+            ):
+                newest_date_str = (
+                    newest_overall.occurred_at.strftime("%Y-%m-%d")
+                    if newest_overall.occurred_at else "?"
+                )
+                driver_staleness_note = (
+                    f"  Note: more recent contact exists ({newest_date_str}, see Recent "
+                    "Communications above) but hasn't been NLP-tagged yet — the drivers "
+                    "below are based on the latest tagged communication instead."
+                )
+
         c_risk = aff.churn_risk_score or 0.5
         g_pot = aff.growth_potential_score or 0.5
-        if c_risk >= 0.65:
-            action = "⚠️  URGENT: Schedule retention call within 48 hours."
-        elif g_pot >= 0.70:
-            action = "🚀  Growth opportunity: Propose scale-up plan."
-        elif c_risk >= 0.45:
-            action = "📞  Monitor: Follow up within 7 days."
-        else:
-            action = "✅  Healthy: Maintain regular check-in cadence."
+
+        # features/leaks only enrich the evidence bundle — recommend() handles
+        # None gracefully, so a failure here must not break the whole summary.
+        try:
+            from src.ml.feature_engineering import build_feature_vector
+            features = build_feature_vector(str(aff.id), db)
+        except Exception as exc:
+            logger.warning(
+                "build_feature_vector failed in get_affiliate_summary — "
+                "continuing without feature evidence",
+                extra={"affiliate_id": str(aff.id), "error": str(exc)},
+            )
+            features = None
+
+        # Fast path: has_active_leak is recomputed from the full leaked_codes
+        # table on every scan (src.scraping.leakage_scraper) — if it's False,
+        # querying LeakedCode would necessarily return nothing (recommend()
+        # treats None and [] identically), so skip the query. Only a safe
+        # drop-in for the "no leak" case — when True, the actual rows are
+        # still fetched below, since recommend()'s evidence text needs the
+        # specific codes, not just a boolean.
+        recent_leaks = None
+        if aff.has_active_leak:
+            try:
+                recent_leaks = (
+                    db.query(LeakedCode)
+                    .filter(LeakedCode.affiliate_id == aff.id)
+                    .order_by(LeakedCode.found_at.desc())
+                    .limit(5)
+                    .all()
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Leak lookup failed in get_affiliate_summary — "
+                    "continuing without leak evidence",
+                    extra={"affiliate_id": str(aff.id), "error": str(exc)},
+                )
+                recent_leaks = None
+
+        rec = recommend(aff, features, recent_leaks)
 
         lines = [
             "═══ AFFILIATE HEALTH SUMMARY ═══",
@@ -226,6 +317,15 @@ def get_affiliate_summary(affiliate_name: str) -> str:
             "─── Recent Communications ───────",
         ]
         lines += (comm_lines or ["  No communications on record."])
+
+        # rec.reason_code is the churn/growth tier, optionally suffixed with
+        # "_leak_detected". The tier alone explains the recommendation text
+        # below; a leak is a separate fact riding along in the same code, not
+        # something that changed the tier — so it's displayed as its own note
+        # rather than folded into a single "reason" line implying causation.
+        tier_reason = rec.reason_code.removesuffix("_leak_detected")
+        leak_on_record = rec.reason_code != tier_reason
+
         lines += [
             "",
             "─── Churn Risk Drivers ──────────",
@@ -233,10 +333,31 @@ def get_affiliate_summary(affiliate_name: str) -> str:
             "",
             "─── Growth Drivers ──────────────",
             f"  {', '.join(growth_factors) if growth_factors else 'Insufficient data'}",
+        ]
+        if driver_staleness_note:
+            lines.append(driver_staleness_note)
+        lines += [
             "",
             "─── Recommended Action ──────────",
-            f"  {action}",
+            f"  {rec.recommendation}",
+            f"  (tier: {tier_reason}, based on churn/growth scores only)",
         ]
+        if leak_on_record:
+            lines.append(
+                "  Note: a promo-code leak is also on record for this affiliate "
+                "(see Evidence below) — unrelated to the tier above."
+            )
+        lines += [
+            "",
+            "─── SEO Signal ──────────────────",
+            f"  Search trend: {aff.search_trend or 'stable'}"
+            " (independent of the tier above — call get_seo_status for keyword/rank detail)",
+        ]
+        lines += [
+            "",
+            "─── Evidence ────────────────────",
+        ]
+        lines += [f"  • {e}" for e in rec.evidence]
         return "\n".join(lines)
     finally:
         db.close()
@@ -244,12 +365,74 @@ def get_affiliate_summary(affiliate_name: str) -> str:
 
 # ─── Tool 4: draft_email ──────────────────────────────────────────────────────
 
+def _compose_email(affiliate_name: str, situation: str, tone: str) -> tuple[str, str]:
+    """Compose (subject, body) for a re-engagement email. LLM-generated when
+    available, template fallback otherwise. Pure composition — no DB, no
+    side effects; draft_email() is the one that files the result for review."""
+    llm = _get_llm()
+    if llm:
+        try:
+            from langchain_core.messages import HumanMessage
+            prompt_text = (
+                f"Write a professional affiliate marketing re-engagement email.\n\n"
+                f"Affiliate: {affiliate_name}\n"
+                f"Situation: {situation}\n"
+                f"Tone: {tone}\n\n"
+                f"Requirements:\n"
+                f"- Under 150 words\n"
+                f"- Start with Subject: on the first line\n"
+                f"- Then Body: on the next line\n"
+                f"- Sound human and specific to the situation\n"
+                f"- Include one concrete next step"
+            )
+            response = llm.invoke([HumanMessage(content=prompt_text)])
+            email_text = response.content
+            if "Subject:" not in email_text:
+                email_text = f"Subject: Following up — {affiliate_name}\n\nBody:\n{email_text}"
+            return _split_subject_body(email_text)
+        except Exception:
+            pass  # fall through to template
+
+    # Template fallback when LLM unavailable
+    first_name = affiliate_name.split()[0] if affiliate_name else "there"
+    body = (
+        f"Hi {first_name},\n\n"
+        f"I wanted to reach out personally given recent activity on your account. "
+        f"Situation context: {situation}.\n\n"
+        f"I'd love to jump on a quick 20-minute call to discuss how we can best support you. "
+        f"When works for you this week?\n\n"
+        f"Tone: {tone}\n\n"
+        f"[Your Name]\nPartner Success Team"
+    )
+    return f"Following up — {affiliate_name}", body
+
+
+def _split_subject_body(email_text: str) -> tuple[str, str]:
+    """Best-effort split of an LLM-composed 'Subject: ...\\n\\nBody:\\n...'
+    block into (subject, body)."""
+    lines = email_text.split("\n")
+    subject = ""
+    body_start = 0
+    for i, line in enumerate(lines):
+        if line.strip().lower().startswith("subject:"):
+            subject = line.split(":", 1)[1].strip()
+            body_start = i + 1
+            break
+    body = "\n".join(lines[body_start:]).strip()
+    if body.lower().startswith("body:"):
+        body = body.split(":", 1)[1].strip()
+    return subject or "Following up", body
+
+
 @tool
 def draft_email(input_str: str) -> str:
     """Draft a personalised re-engagement or follow-up email for an affiliate.
     Input should be a string containing: affiliate name, their current situation
     (scores, recent behaviour), and the desired tone (urgent, warm, neutral).
     Use this as the final step after understanding an affiliate's situation.
+    This does NOT send anything — it files the draft as a pending request in
+    the approval queue (status: waiting_for_review). A human must approve it
+    via POST /approvals/{id}/approve before it is ever sent.
     Example input: 'affiliate_name: Tom Bauer, situation: 51 days silent,
     competitor mentioned, CTR declining -4.2%, tone: urgent but warm'"""
     # Parse input string
@@ -269,44 +452,54 @@ def draft_email(input_str: str) -> str:
     if not affiliate_name:
         affiliate_name = input_str[:50]
 
-    # Try LLM-generated email
-    llm = _get_llm()
-    if llm:
-        try:
-            from langchain_core.messages import HumanMessage, SystemMessage
-            prompt_text = (
-                f"Write a professional affiliate marketing re-engagement email.\n\n"
-                f"Affiliate: {affiliate_name}\n"
-                f"Situation: {situation}\n"
-                f"Tone: {tone}\n\n"
-                f"Requirements:\n"
-                f"- Under 150 words\n"
-                f"- Start with Subject: on the first line\n"
-                f"- Then Body: on the next line\n"
-                f"- Sound human and specific to the situation\n"
-                f"- Include one concrete next step"
+    db = _get_db()
+    try:
+        aff = (
+            db.query(Affiliate)
+            .filter(Affiliate.name.ilike(f"%{affiliate_name.strip()}%"))
+            .first()
+        )
+        if not aff:
+            return (
+                f"Cannot create a draft: no affiliate found matching '{affiliate_name}'. "
+                "Look up the affiliate first (e.g. via query_database or get_affiliate_summary) "
+                "and retry with their exact name."
             )
-            response = llm.invoke([HumanMessage(content=prompt_text)])
-            email_text = response.content
-            if "Subject:" not in email_text:
-                email_text = f"Subject: Following up — {affiliate_name}\n\nBody:\n{email_text}"
-            return f"=== EMAIL DRAFT ===\n\n{email_text}"
-        except Exception as exc:
-            pass  # fall through to template
 
-    # Template fallback when LLM unavailable
-    first_name = affiliate_name.split()[0] if affiliate_name else "there"
-    return (
-        f"=== EMAIL DRAFT (template fallback — LLM unavailable) ===\n\n"
-        f"Subject: Following up — {affiliate_name}\n\n"
-        f"Hi {first_name},\n\n"
-        f"I wanted to reach out personally given recent activity on your account. "
-        f"Situation context: {situation}.\n\n"
-        f"I'd love to jump on a quick 20-minute call to discuss how we can best support you. "
-        f"When works for you this week?\n\n"
-        f"Tone: {tone}\n\n"
-        f"[Your Name]\nPartner Success Team"
-    )
+        subject, body = _compose_email(aff.name, situation, tone)
+
+        # No contact email is stored in this schema (see src.storage.models.Affiliate)
+        # — flagged clearly rather than fabricating a plausible-looking address.
+        to_placeholder = f"{aff.name} <no email on file>"
+
+        approval = ApprovalRequest(
+            kind="email",
+            affiliate_id=aff.id,
+            payload={
+                "to": to_placeholder,
+                "subject": subject,
+                "body": body,
+                "affiliate_id": str(aff.id),
+            },
+            status="waiting_for_review",
+        )
+        db.add(approval)
+        db.commit()
+        db.refresh(approval)
+
+        logger.info(
+            "Draft email filed for approval",
+            extra={"approval_id": str(approval.id), "affiliate_id": str(aff.id)},
+        )
+
+        return (
+            f"Draft created for {aff.name} — pending approval as request {approval.id}.\n"
+            f"Subject: {subject}\n\n"
+            f"It will not be sent until a human approves it via "
+            f"POST /approvals/{approval.id}/approve."
+        )
+    finally:
+        db.close()
 
 
 # ─── Tool 5: get_portfolio_health ────────────────────────────────────────────
@@ -314,8 +507,13 @@ def draft_email(input_str: str) -> str:
 @tool
 def get_portfolio_health(input_str: str = "") -> str:
     """Get a summary of the entire affiliate portfolio health including average
-    health score, number of at-risk affiliates, high growth affiliates, and
-    churned affiliates. Use this for portfolio-level questions."""
+    health score, number of at-risk affiliates, high growth affiliates,
+    churned affiliates, active promo-code leaks, and declining SEO trends.
+    Use this for portfolio-level questions, including "which affiliates need
+    attention" or "which affiliates have warning signs" — warning signs span
+    all three signal types this system tracks (churn/growth tier, leaks, SEO
+    trend), not just the rulebook tier, so check this tool's leak and SEO
+    counts/names too, not only the at-risk list."""
     db = _get_db()
     try:
         affiliates = db.query(Affiliate).all()
@@ -327,9 +525,24 @@ def get_portfolio_health(input_str: str = "") -> str:
         avg_churn = sum(a.churn_risk_score or 0.5 for a in affiliates) / n
         avg_growth = sum(a.growth_potential_score or 0.5 for a in affiliates) / n
 
-        at_risk = [a for a in affiliates if (a.churn_risk_score or 0.0) > 0.5]
-        high_growth = [a for a in affiliates if (a.growth_potential_score or 0.0) > 0.5]
-        churned = [a for a in affiliates if (a.churn_risk_score or 0.0) > 0.8]
+        # Tiers are mutually exclusive (see src/rulebook/recommend.categorize) —
+        # a churned affiliate counts only as "churned", not double-counted
+        # under "at_risk" as well.
+        tiers = {
+            a.id: categorize(a.churn_risk_score or 0.0, a.growth_potential_score or 0.0)
+            for a in affiliates
+        }
+        at_risk = [a for a in affiliates if tiers[a.id] == "at_risk"]
+        high_growth = [a for a in affiliates if tiers[a.id] == "high_growth"]
+        churned = [a for a in affiliates if tiers[a.id] == "churned"]
+
+        # Leak and SEO signals are visibility-only here — deliberately never
+        # folded into avg_churn/avg_health or the tier counts above (see
+        # src.rulebook.recommend and Tier B / SEO task docs for why they stay
+        # separate). This just gives the agent a way to see them exist at the
+        # portfolio level without querying every affiliate individually.
+        leaking = [a for a in affiliates if a.has_active_leak]
+        declining_seo = [a for a in affiliates if a.search_trend == "declining"]
 
         score_history_count = db.query(ScoreHistory).count()
 
@@ -344,9 +557,11 @@ def get_portfolio_health(input_str: str = "") -> str:
             f"Avg growth potential:{avg_growth:.1%}",
             f"Score history rows:  {score_history_count}",
             "",
-            f"At-risk (churn > 50%):  {len(at_risk)} affiliate(s)",
-            f"High-growth (>50%):     {len(high_growth)} affiliate(s)",
-            f"Critical (churn > 80%): {len(churned)} affiliate(s)",
+            f"At-risk (50-80% churn):  {len(at_risk)} affiliate(s)",
+            f"High-growth (>50%):      {len(high_growth)} affiliate(s)",
+            f"Critical (churn > 80%):  {len(churned)} affiliate(s)",
+            f"Active promo-code leaks: {len(leaking)} affiliate(s)  (separate signal — not a tier)",
+            f"Declining SEO trend:     {len(declining_seo)} affiliate(s)  (separate signal — not a tier)",
             "",
             "─── Worst 3 (needs attention) ───",
         ]
@@ -361,9 +576,156 @@ def get_portfolio_health(input_str: str = "") -> str:
             lines += ["", "─── At-Risk Names ───────────────"]
             lines.append("  " + ", ".join(a.name for a in at_risk))
 
+        if leaking:
+            lines += ["", "─── Active Leak Names ───────────"]
+            lines.append("  " + ", ".join(a.name for a in leaking))
+
+        if declining_seo:
+            lines += ["", "─── Declining SEO Names ─────────"]
+            lines.append("  " + ", ".join(a.name for a in declining_seo))
+
         return "\n".join(lines)
     finally:
         db.close()
+
+
+# ─── Tool 6: get_leakage_status ───────────────────────────────────────────────
+
+@tool
+def get_leakage_status(affiliate_id: str) -> str:
+    """Report the most recently recorded promo-code leak findings for a
+    specific affiliate. This is READ-ONLY — it does not run a new scan.
+    It reflects the last completed scan, whether that was the nightly
+    scheduled job (03:00 UTC) or an on-demand scan triggered via
+    POST /leakage/scan; it cannot trigger a new scan itself. If the data
+    might be stale and the user needs a fresh check, tell them to trigger
+    POST /leakage/scan (or wait for the next scheduled run) — you cannot
+    start one from this tool.
+    Use this when a user asks whether an affiliate's code has been shared
+    without authorisation, or to check before a retention call.
+    Input must be the affiliate's UUID (not their name).
+    To get the UUID first, use query_database:
+      SELECT id, name FROM affiliates WHERE name ILIKE '%<name>%'"""
+    try:
+        aff_uuid = uuid.UUID(affiliate_id)
+    except ValueError:
+        return (
+            f"'{affiliate_id}' is not a valid UUID. Look up the affiliate's UUID first "
+            "via query_database: SELECT id, name FROM affiliates WHERE name ILIKE '%<name>%'"
+        )
+
+    db = _get_db()
+    try:
+        aff = db.query(Affiliate).filter(Affiliate.id == aff_uuid).first()
+
+        # Fast path: has_active_leak is recomputed from the full leaked_codes
+        # table on every scan (src.scraping.leakage_scraper) — if it's False
+        # (or the affiliate doesn't exist), querying LeakedCode would
+        # necessarily return nothing, so skip it. Only a safe drop-in for the
+        # "no leak" case — when True, the actual rows are still needed below
+        # for site/code/url detail, which the flag alone cannot provide.
+        recent = []
+        if aff and aff.has_active_leak:
+            recent = (
+                db.query(LeakedCode)
+                .filter(LeakedCode.affiliate_id == aff_uuid)
+                .order_by(LeakedCode.found_at.desc())
+                .limit(5)
+                .all()
+            )
+    finally:
+        db.close()
+
+    if not recent:
+        return (
+            "No promo-code leaks are on record for this affiliate as of the last scan. "
+            "This reflects the most recent scheduled or on-demand scan, not a live check "
+            "run just now."
+        )
+
+    lines = [f"⚠️  {len(recent)} recorded leak(s) for this affiliate (most recent first):\n"]
+    for leak in recent:
+        lines.append(
+            f"  • Code: {leak.code}\n"
+            f"    Site: {leak.site}\n"
+            f"    URL:  {leak.source_url}\n"
+            f"    Found at: {leak.found_at.isoformat() if leak.found_at else '?'} "
+            f"(scan_type: {leak.scan_type})"
+        )
+    lines.append(
+        "\nThis is the last recorded scan, not a live check run just now — "
+        "trigger POST /leakage/scan for a fresh one."
+    )
+    return "\n".join(lines)
+
+
+# ─── Tool 7: get_seo_status ────────────────────────────────────────────────────
+
+@tool
+def get_seo_status(affiliate_id: str) -> str:
+    """Report the most recently recorded SEO rank-tracking signal for a
+    specific affiliate. This is READ-ONLY — it does not run a new check.
+    It reflects the last completed check, whether that was the weekly
+    scheduled job (Monday 04:00 UTC) or an on-demand check triggered via
+    POST /seo/scan; it cannot trigger a new check itself. If the data might
+    be stale and the user needs a fresh check, tell them to trigger
+    POST /seo/scan (or wait for the next scheduled run) — you cannot start
+    one from this tool.
+    Use this when a user asks about an affiliate's search visibility or
+    organic ranking trend.
+    Input must be the affiliate's UUID (not their name).
+    To get the UUID first, use query_database:
+      SELECT id, name FROM affiliates WHERE name ILIKE '%<name>%'"""
+    try:
+        aff_uuid = uuid.UUID(affiliate_id)
+    except ValueError:
+        return (
+            f"'{affiliate_id}' is not a valid UUID. Look up the affiliate's UUID first "
+            "via query_database: SELECT id, name FROM affiliates WHERE name ILIKE '%<name>%'"
+        )
+
+    db = _get_db()
+    try:
+        aff = db.query(Affiliate).filter(Affiliate.id == aff_uuid).first()
+
+        # Fast path: search_trend is recomputed from the full seo_signals
+        # table on every check (src.seo.checker) — if the affiliate has no
+        # tracked_keyword (or doesn't exist), querying SeoSignal would
+        # necessarily return nothing, so skip it.
+        recent = []
+        if aff and aff.tracked_keyword:
+            recent = (
+                db.query(SeoSignal)
+                .filter(SeoSignal.affiliate_id == aff_uuid)
+                .order_by(SeoSignal.checked_at.desc())
+                .limit(5)
+                .all()
+            )
+    finally:
+        db.close()
+
+    if not recent:
+        return (
+            "No SEO rank-tracking data is on record for this affiliate. Either no "
+            "keyword is tracked for them, or the last check found nothing recorded yet."
+        )
+
+    lines = [
+        f"Search trend: {aff.search_trend} ({len(recent)} recorded check(s), most recent first):\n"
+    ]
+    for s in recent:
+        change_str = f"{s.rank_change:+d}" if s.rank_change is not None else "n/a"
+        lines.append(
+            f"  • Keyword: {s.keyword}\n"
+            f"    Rank: {s.rank} (change vs previous check: {change_str})\n"
+            f"    Search volume: {s.search_volume}\n"
+            f"    Checked at: {s.checked_at.isoformat() if s.checked_at else '?'}"
+        )
+    lines.append(
+        "\nThis is the last recorded check, not a live check run just now — "
+        "trigger POST /seo/scan for a fresh one."
+    )
+    return "\n".join(lines)
 
 
 # Expose tools list for agent setup
@@ -373,4 +735,6 @@ TOOLS = [
     get_affiliate_summary,
     draft_email,
     get_portfolio_health,
+    get_leakage_status,
+    get_seo_status,
 ]

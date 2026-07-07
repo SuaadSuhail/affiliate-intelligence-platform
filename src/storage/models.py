@@ -298,6 +298,14 @@ class ApprovalRequest(Base):
     created_at = Column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
+    # NULL means "not part of a tracked chat session" (a legacy row, or one
+    # created via POST /approvals directly) — never used as a match key on
+    # its own; see draft_email() in src/agent/tools.py.
+    session_id = Column(String(64), nullable=True)
+    # Left unset on creation; only written when draft_email revises an
+    # existing waiting_for_review row in place instead of inserting a new
+    # one — doubles as a cheap "was this ever revised" signal.
+    updated_at = Column(DateTime(timezone=True), nullable=True)
     decided_at = Column(DateTime(timezone=True), nullable=True)
     decided_by = Column(String(128), nullable=True)
 

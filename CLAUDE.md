@@ -745,6 +745,19 @@ action; see § Promo code leakage detector's has_active_leak note and
 - `GET /agent/health` returns `{agent_ready, openai_key_configured, model, last_error}` with no
   API call — useful for readiness checks without spending tokens
 - Demo endpoint (`GET /agent/demo`) runs 3 questions sequentially; requires models trained first
+- **The agent layer is fully stateless server-side** — no LangGraph checkpointer or `thread_id`
+  is wired up. The only continuity across a chat is `conversation_id`, generated client-side on
+  chat start and regenerated on "New chat" (which resets id, message history, and input together,
+  so they can't drift apart — see the frontend's `ChatInterface.tsx`). It is passed from the
+  frontend on every `POST /agent/chat` request, threaded through `run_agent()` via
+  `config={"configurable": {"conversation_id": ...}}`, and reaches tools via LangChain's
+  injected-config mechanism: a tool parameter typed `config: Annotated[RunnableConfig,
+  InjectedToolArg]`, declared **required and keyword-only** (no default value) so it stays
+  invisible to the LLM's own tool-call schema. A `RunnableConfig`-typed param *with* a default of
+  `None` looked equivalent but is not — pydantic builds `Optional[Annotated[...]]` in that case,
+  which shifts the `InjectedToolArg` metadata to a position LangChain's schema-exclusion check
+  doesn't look at, so `config` leaks into the schema shown to the model. Confirmed empirically
+  before relying on it; see `draft_email` for the working pattern.
 - **`SYSTEM_PROMPT` scope restriction**: the prompt ends with `IMPORTANT SCOPE RULES` that instruct the agent to refuse any question not related to affiliate management (general knowledge, news, politics, geography, etc.) and respond with a fixed out-of-scope message. The agent must only use tool data — never its own general knowledge.
 - **"Warning signs" guidance**: the prompt explicitly instructs that "warning signs"/"risk"/
   "needs attention" span all three signal types this system tracks (churn/growth tier, leaks,
@@ -786,10 +799,13 @@ inserts an `ApprovalRequest` row with `status='waiting_for_review'` instead
 | `payload` | JSONB | For email: `{to, subject, body, affiliate_id}` |
 | `status` | VARCHAR(20) | `waiting_for_review` \| `approved` \| `rejected` |
 | `created_at` | TIMESTAMPTZ | |
+| `session_id` | VARCHAR(64) NULLABLE | Client-generated `conversation_id`; NULL for legacy rows and any non-chat caller (e.g. `POST /approvals` used directly) — see § LangChain agent's statelessness note and the draft_email grounding note below |
+| `updated_at` | TIMESTAMPTZ NULLABLE | Left unset on creation; only written when `draft_email` revises an existing row in place |
 | `decided_at` | TIMESTAMPTZ NULLABLE | Set on approve/reject |
 | `decided_by` | VARCHAR(128) NULLABLE | See placeholder note below |
 
-Indexes on `affiliate_id` and `status`.
+Indexes on `affiliate_id` and `status`. `session_id`/`updated_at` added in
+`alembic/versions/d3f7a9b21c44_add_session_id_to_approval_requests.py`.
 
 **`decided_by` is a fixed placeholder (`"api"`), not a real user identity.**
 There is no per-user auth system in this app — `src.api.auth.get_api_key`
@@ -819,6 +835,42 @@ that greps all of `src/` for any other reference.
 already decided (e.g. a double-click, or two people acting on the same
 request) — the frontend (`Approvals.tsx`) treats a 409 as "someone already
 decided this" and refreshes the list rather than surfacing a raw error.
+
+**`draft_email` grounding fix.** The tool previously took a single
+comma-split `input_str` (affiliate name, a freeform `situation` string the
+agent had to compose itself, tone), generated the email body with a second,
+context-blind LLM call, and returned only the subject line — never the
+body — so the agent's chat description of "the email" was never grounded in
+what was actually stored. This produced drift between what the chat said
+and what the approval queue held (a real affiliate ended up with 13+
+independent, sometimes contradictory drafts). Fixed:
+- `draft_email(affiliate_name, situation_override="", tone="warm", *,
+  config)` now pulls health/churn/growth scores, days since contact, active
+  leak, and SEO trend **directly from the database** (via helpers shared
+  with `get_leakage_status`/`get_seo_status` — `_get_recent_leaks()`,
+  `_get_recent_seo()`) instead of relying on the agent to summarize them.
+  `situation_override` only augments this, it never replaces it.
+- The tool's return value now includes the full composed subject **and**
+  body, not just the subject — the agent can no longer describe content it
+  was never given back.
+- `_compose_email()` validates generated text against bracket placeholders
+  (e.g. `[Recipient's Name]`) and third-person self-reference (e.g. "check
+  out his recent insights" in an email addressed to that same person) via
+  `_validate_email_body()`, retries up to 3 times with the specific
+  violation fed back to the model, and falls through to a deterministic,
+  fact-only template (guaranteed to pass validation) if every attempt still
+  fails.
+- Revise-in-place: if a `waiting_for_review` request already exists for
+  `(affiliate_id, session_id=conversation_id, kind="email")`, a further
+  `draft_email` call **updates** that row (`payload`, `updated_at`) instead
+  of inserting a new one. A missing/null `conversation_id` always inserts —
+  matching on `affiliate_id` alone was deliberately rejected, since two
+  unrelated conversations about the same affiliate would otherwise silently
+  overwrite each other's drafts.
+- Writes an `audit_log` entry per call (`stage="agent"`,
+  `rule_or_tool="draft_email"`) with `output_snapshot.action` set to
+  `"created"` or `"revised"` — the first audit wiring point for this tool;
+  see § Audit log.
 
 ---
 
@@ -853,9 +905,9 @@ when to log.
 
 Index on `(record_type, record_id)`.
 
-**Four wiring points** write to this table (`src/audit/log.py`'s own module
-docstring says three — that predates the SEO work and is now stale; the
-real count is four):
+**Five wiring points** write to this table (`src/audit/log.py`'s own module
+docstring said three, then four, at various earlier points — both stale;
+the real count is five):
 1. `src/ml/score_updater.py` — `stage="rulebook"`, one entry per affiliate
    per scoring run, linking the feature inputs to `recommend()`'s tier +
    evidence
@@ -867,20 +919,24 @@ real count is four):
    misses
 4. `src/api/routers/approvals.py` — `stage="approval"`, on both approve and
    reject
+5. `src/agent/tools.py` `draft_email` — `stage="agent"`, on every create or
+   revise (see § Approval queue's grounding-fix note)
 
 **`GET /audit?record_type=&record_id=&stage=&limit=&offset=`** —
 deliberately API-key gated, unlike most other GET routes in this app (a
 design choice: this is a decision-trail endpoint, not general read access).
 
-**Referential-integrity regression tests:** for each of the four wiring
-points, a test confirms the `record_id` written actually resolves to a
-real row in the table implied by `record_type` — not a schema constraint
-(`record_id` stays polymorphic and unconstrained by design), just a
-regression check against a future bug that writes an audit entry pointing
-nowhere. Two live in `tests/test_audit.py` (score_updater, approvals); the
-leakage and SEO checks live as extra assertions on each module's own
-existing real-DB tests (`tests/test_leakage_scraper.py`, `tests/test_seo.py`)
-rather than duplicating setup in `test_audit.py`.
+**Referential-integrity regression tests:** for each wiring point, a test
+confirms the `record_id` written actually resolves to a real row in the
+table implied by `record_type` — not a schema constraint (`record_id` stays
+polymorphic and unconstrained by design), just a regression check against a
+future bug that writes an audit entry pointing nowhere. Two live in
+`tests/test_audit.py` (score_updater, approvals); the leakage and SEO
+checks live as extra assertions on each module's own existing real-DB tests
+(`tests/test_leakage_scraper.py`, `tests/test_seo.py`); the `draft_email`
+check lives the same way, as extra assertions on its own real-DB tests in
+`tests/test_approvals.py` — all following the same "extend the module's own
+test rather than duplicate setup in `test_audit.py`" pattern.
 
 **Not the same as `GET /admin/logs`** (see § Log persistence) — this table
 is for decision-linked entries only (a deliberate subset); the log file is

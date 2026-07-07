@@ -8,11 +8,13 @@ to log. It does not commit; the caller already owns the transaction, same
 as every other insert in this codebase (e.g. score_history rows in
 src.ml.score_updater are add()-ed and committed by the caller too).
 
-Call sites (exactly four — see each module for why):
+Call sites (exactly five — see each module for why):
   - src.ml.score_updater      (stage="rulebook", after recommend())
   - src.scraping.leakage_scraper (stage="signals", after a scan completes)
   - src.seo.checker           (stage="signals", after a rank check completes)
   - src.api.routers.approvals (stage="approval", on approve/reject)
+  - src.agent.tools.draft_email (stage="agent", on create or revise —
+    output_snapshot.action distinguishes the two)
 """
 
 from __future__ import annotations

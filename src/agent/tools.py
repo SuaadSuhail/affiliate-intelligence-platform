@@ -25,11 +25,14 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, Optional
 
 from langchain.tools import tool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import InjectedToolArg
 from sqlalchemy import text
 
+from src.audit.log import write_audit_entry
 from src.core.logging_config import get_logger
 from src.rulebook.recommend import categorize, recommend
 from src.storage.database import SessionLocal
@@ -48,6 +51,12 @@ _BLOCKED_KEYWORDS = re.compile(
     r'\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|EXEC|EXECUTE)\b',
     re.IGNORECASE,
 )
+
+# Same bands used for health-bar color-coding in src/api/templates/index.html
+# (h < 40 = red, h >= 60 = green) — reused here so "performing well" and
+# "needs attention" match an existing convention instead of introducing a new one.
+PERFORMING_WELL_THRESHOLD = 60.0  # health_score >= this = performing well
+NEEDS_ATTENTION_THRESHOLD = 40.0  # health_score < this = needs attention
 
 
 def _get_db():
@@ -365,45 +374,235 @@ def get_affiliate_summary(affiliate_name: str) -> str:
 
 # ─── Tool 4: draft_email ──────────────────────────────────────────────────────
 
-def _compose_email(affiliate_name: str, situation: str, tone: str) -> tuple[str, str]:
-    """Compose (subject, body) for a re-engagement email. LLM-generated when
-    available, template fallback otherwise. Pure composition — no DB, no
-    side effects; draft_email() is the one that files the result for review."""
+def _get_recent_leaks(db, aff) -> list:
+    """Most recently recorded promo-code leak rows for one affiliate, or []
+    if none. Fast-pathed on has_active_leak — see get_leakage_status for why
+    this is safe. Shared by get_leakage_status and draft_email's fact
+    gathering so both read the exact same query, not two copies of it."""
+    if not (aff and aff.has_active_leak):
+        return []
+    return (
+        db.query(LeakedCode)
+        .filter(LeakedCode.affiliate_id == aff.id)
+        .order_by(LeakedCode.found_at.desc())
+        .limit(5)
+        .all()
+    )
+
+
+def _get_recent_seo(db, aff) -> list:
+    """Most recently recorded SEO rank-tracking rows for one affiliate, or
+    [] if none. Fast-pathed on tracked_keyword — see get_seo_status for why
+    this is safe. Shared by get_seo_status and draft_email's fact gathering
+    so both read the exact same query, not two copies of it."""
+    if not (aff and aff.tracked_keyword):
+        return []
+    return (
+        db.query(SeoSignal)
+        .filter(SeoSignal.affiliate_id == aff.id)
+        .order_by(SeoSignal.checked_at.desc())
+        .limit(5)
+        .all()
+    )
+
+
+def _build_affiliate_facts(db, aff) -> dict:
+    """Concrete, DB-sourced facts about one affiliate for email composition.
+    This is what grounds draft_email in real data instead of a freeform
+    'situation' string the agent would otherwise have to summarize itself —
+    the agent no longer has to remember to mention a leak or SEO decline;
+    draft_email looks them up directly, the same way get_leakage_status and
+    get_seo_status would."""
+    leaks = _get_recent_leaks(db, aff)
+    seo = _get_recent_seo(db, aff)
+    return {
+        "health_score": aff.health_score,
+        "churn_risk_score": aff.churn_risk_score,
+        "growth_potential_score": aff.growth_potential_score,
+        "days_since_contact": aff.days_since_contact,
+        "leak_code": leaks[0].code if leaks else None,
+        "leak_site": leaks[0].site if leaks else None,
+        "seo_trend_direction": aff.search_trend if seo else None,
+        "seo_keyword": seo[0].keyword if seo else None,
+    }
+
+
+def _format_facts_block(facts: dict) -> str:
+    """Render an affiliate facts dict as a labelled bullet list for the
+    composition prompt — only facts that are actually present are included,
+    so the LLM has nothing to guess or pad around."""
+    fact_lines = [
+        f"Health score: {facts['health_score']:.1f}/100"
+        if facts.get("health_score") is not None else None,
+        f"Churn risk: {facts['churn_risk_score']:.0%}"
+        if facts.get("churn_risk_score") is not None else None,
+        f"Growth potential: {facts['growth_potential_score']:.0%}"
+        if facts.get("growth_potential_score") is not None else None,
+        f"Days since last contact: {facts['days_since_contact']}"
+        if facts.get("days_since_contact") is not None else None,
+        f'Active promo-code leak: code "{facts["leak_code"]}" found on {facts["leak_site"]}'
+        if facts.get("leak_code") else None,
+        f"SEO search trend: {facts['seo_trend_direction']} (keyword: {facts['seo_keyword']})"
+        if facts.get("seo_trend_direction") else None,
+    ]
+    present = [f"- {line}" for line in fact_lines if line]
+    return "\n".join(present) if present else "- No specific signals on record beyond standard profile data."
+
+
+# Sender-signature placeholders are expected and fine — a human fills these
+# in before sending. Everything else in brackets is treated as a content
+# gap the model stubbed instead of omitting, which is the failure mode this
+# validator exists to catch.
+_SIGNATURE_PLACEHOLDER_ALLOWLIST = {
+    "[your name]", "[your position]", "[your title]", "[your company]",
+}
+_BRACKET_PATTERN = re.compile(r"\[[^\[\]]+\]")
+_THIRD_PERSON_PRONOUN_PATTERN = re.compile(r"\b(he|him|his|she|her|hers)\b", re.IGNORECASE)
+
+
+def _validate_email_body(body: str, affiliate_name: str) -> list[str]:
+    """Lightweight regex safety net — not a substitute for good prompting —
+    catching the two failure modes actually observed in production:
+    bracket placeholders standing in for facts the model didn't have (e.g.
+    "[Recipient's Name]", "[specific topic]") and third-person
+    self-reference to the very person the email is addressed to (e.g.
+    "check out his recent insights" in an email TO that person). Returns a
+    list of violation descriptions; empty means the body passed."""
+    violations: list[str] = []
+
+    for match in _BRACKET_PATTERN.findall(body):
+        if match.lower() not in _SIGNATURE_PLACEHOLDER_ALLOWLIST:
+            violations.append(f"bracket placeholder: {match}")
+
+    if _THIRD_PERSON_PRONOUN_PATTERN.search(body):
+        violations.append(
+            "third-person pronoun (he/him/his/she/her/hers) — the affiliate "
+            "should be addressed directly as 'you'"
+        )
+
+    first_name = affiliate_name.split()[0] if affiliate_name else ""
+    if first_name and re.search(rf"\b{re.escape(first_name)}'s\b", body):
+        violations.append(
+            f"third-person possessive reference to the affiliate's own first "
+            f"name ('{first_name}'s')"
+        )
+    if affiliate_name and re.search(rf"\b{re.escape(affiliate_name)}'(?!\w)", body):
+        violations.append(
+            f"third-person possessive reference to the affiliate's own full "
+            f"name ('{affiliate_name}'')"
+        )
+
+    return violations
+
+
+_MAX_COMPOSE_ATTEMPTS = 3
+
+
+def _compose_email(
+    affiliate_name: str, tone: str, facts: dict, situation_override: str = ""
+) -> tuple[str, str]:
+    """Compose (subject, body) for a re-engagement email, grounded in
+    concrete DB-sourced facts (health/churn/growth scores, days since
+    contact, active leak, SEO trend — see _build_affiliate_facts) rather
+    than a freeform situation string the agent would otherwise have to
+    compose and summarize itself. LLM-generated when available, template
+    fallback otherwise. Pure composition — no DB writes, no side effects;
+    draft_email() is the one that files the result for review."""
+    fact_block = _format_facts_block(facts)
+    first_name = affiliate_name.split()[0] if affiliate_name else "there"
+
     llm = _get_llm()
     if llm:
         try:
             from langchain_core.messages import HumanMessage
-            prompt_text = (
+
+            base_prompt = (
                 f"Write a professional affiliate marketing re-engagement email.\n\n"
                 f"Affiliate: {affiliate_name}\n"
-                f"Situation: {situation}\n"
+                f"Known facts about this affiliate (use ONLY these — do not invent "
+                f"or assume anything beyond them):\n{fact_block}\n"
+            )
+            if situation_override:
+                base_prompt += f"Additional context to emphasize: {situation_override}\n"
+            base_prompt += (
                 f"Tone: {tone}\n\n"
                 f"Requirements:\n"
                 f"- Under 150 words\n"
                 f"- Start with Subject: on the first line\n"
                 f"- Then Body: on the next line\n"
-                f"- Sound human and specific to the situation\n"
+                f"- Sound human and specific to the facts above\n"
+                f"- Address {first_name} directly, in second person ('you'/'your') "
+                f"throughout — never refer to them in the third person (no "
+                f"'he'/'him'/'his'/'she'/'her', and never use their own name as "
+                f"if describing them to someone else, e.g. \"check out "
+                f"{first_name}'s insights\")\n"
+                f"- Do not use bracket placeholders (e.g. [Name], [specific topic]) "
+                f"for anything — if a detail isn't in the facts above, leave it out "
+                f"entirely rather than stubbing it with a placeholder. A "
+                f"placeholder for the SENDER's own name/title/company (e.g. "
+                f"[Your Name]) is fine — it is meant to be filled in by the human "
+                f"who sends this\n"
                 f"- Include one concrete next step"
             )
-            response = llm.invoke([HumanMessage(content=prompt_text)])
-            email_text = response.content
-            if "Subject:" not in email_text:
-                email_text = f"Subject: Following up — {affiliate_name}\n\nBody:\n{email_text}"
-            return _split_subject_body(email_text)
+
+            # Retry on validation failure rather than shipping a draft with a
+            # bracket placeholder or third-person self-reference — both were
+            # observed in production (see draft_email's docstring). Each retry
+            # tells the model exactly what it got wrong last time.
+            correction_note = ""
+            for attempt in range(1, _MAX_COMPOSE_ATTEMPTS + 1):
+                prompt_text = base_prompt + (f"\n\n{correction_note}" if correction_note else "")
+                response = llm.invoke([HumanMessage(content=prompt_text)])
+                email_text = response.content
+                if "Subject:" not in email_text:
+                    email_text = f"Subject: Following up — {affiliate_name}\n\nBody:\n{email_text}"
+                subject, body = _split_subject_body(email_text)
+
+                violations = _validate_email_body(body, affiliate_name)
+                if not violations:
+                    return subject, body
+
+                logger.warning(
+                    "draft_email composition failed validation, retrying",
+                    extra={"attempt": attempt, "violations": violations},
+                )
+                correction_note = (
+                    "IMPORTANT: your previous attempt was rejected for: "
+                    f"{'; '.join(violations)}. Rewrite it addressing {first_name} "
+                    "directly as 'you' throughout, with no third-person reference "
+                    "to them and no bracket placeholder other than the sender's "
+                    "own name/title/company."
+                )
+            # All attempts still failed validation — fall through to the
+            # deterministic template rather than ship a bad draft.
         except Exception:
             pass  # fall through to template
 
-    # Template fallback when LLM unavailable
-    first_name = affiliate_name.split()[0] if affiliate_name else "there"
+    # Template fallback when LLM unavailable, or when every LLM attempt above
+    # still failed validation — built directly from facts, no situation
+    # string to interpolate, and guaranteed to pass _validate_email_body on
+    # its own (verified below; situation_override is the only free-text
+    # component, so it's the only thing stripped if validation still fails).
+    fact_lines = [line[2:] for line in fact_block.split("\n") if line.startswith("- ")]
+    context_str = "; ".join(fact_lines) if fact_lines else "recent account activity"
     body = (
         f"Hi {first_name},\n\n"
-        f"I wanted to reach out personally given recent activity on your account. "
-        f"Situation context: {situation}.\n\n"
+        f"I wanted to reach out personally given the following: {context_str}.\n\n"
         f"I'd love to jump on a quick 20-minute call to discuss how we can best support you. "
         f"When works for you this week?\n\n"
-        f"Tone: {tone}\n\n"
         f"[Your Name]\nPartner Success Team"
     )
+    if situation_override:
+        body_with_override = body.replace(
+            "When works for you this week?",
+            f"When works for you this week? ({situation_override})",
+        )
+        # Only free text in the template path — validate before using it, in
+        # case situation_override itself contains a placeholder or
+        # third-person reference. Drop it rather than ship a bad draft.
+        if not _validate_email_body(body_with_override, affiliate_name):
+            body = body_with_override
+
     return f"Following up — {affiliate_name}", body
 
 
@@ -425,32 +624,40 @@ def _split_subject_body(email_text: str) -> tuple[str, str]:
 
 
 @tool
-def draft_email(input_str: str) -> str:
+def draft_email(
+    affiliate_name: str,
+    situation_override: str = "",
+    tone: str = "warm",
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg],
+) -> str:
     """Draft a personalised re-engagement or follow-up email for an affiliate.
-    Input should be a string containing: affiliate name, their current situation
-    (scores, recent behaviour), and the desired tone (urgent, warm, neutral).
+    This tool automatically pulls the affiliate's current health/churn/growth
+    scores, days since last contact, active promo-code leak status, and SEO
+    rank trend directly from the database — you do NOT need to summarize
+    these into a situation string yourself, and the email is grounded in
+    this real data regardless of what you do or don't mention. Use
+    situation_override only to add something the tool cannot already see
+    (e.g. a specific detail from a recent call you want emphasized) — it
+    augments, it does not replace, the DB-sourced facts.
     Use this as the final step after understanding an affiliate's situation.
     This does NOT send anything — it files the draft as a pending request in
     the approval queue (status: waiting_for_review). A human must approve it
     via POST /approvals/{id}/approve before it is ever sent.
-    Example input: 'affiliate_name: Tom Bauer, situation: 51 days silent,
-    competitor mentioned, CTR declining -4.2%, tone: urgent but warm'"""
-    # Parse input string
-    affiliate_name = ""
-    situation = ""
-    tone = "warm"
-
-    for part in input_str.split(","):
-        part = part.strip()
-        if part.lower().startswith("affiliate_name:"):
-            affiliate_name = part.split(":", 1)[1].strip()
-        elif part.lower().startswith("situation:"):
-            situation = part.split(":", 1)[1].strip()
-        elif part.lower().startswith("tone:"):
-            tone = part.split(":", 1)[1].strip()
-
-    if not affiliate_name:
-        affiliate_name = input_str[:50]
+    If a "please revise it" request follows an earlier draft for the same
+    affiliate in this same conversation, calling this tool again UPDATES that
+    same pending request in place instead of creating an unrelated new one —
+    you do not need to do anything differently to get this behaviour.
+    This tool returns the full composed subject AND body — describe only
+    what is actually returned to you here, never content you were not given
+    back by this tool.
+    Example: draft_email(affiliate_name="Tom Bauer", tone="urgent but warm")"""
+    # conversation_id is injected via RunnableConfig (see run_agent's call to
+    # agent.invoke(..., config={"configurable": {"conversation_id": ...}})) —
+    # it is never something the LLM supplies itself, so it can't be spoofed
+    # or omitted by the agent's own reasoning. None for any caller that
+    # doesn't go through run_agent (e.g. a direct test invocation).
+    conversation_id = ((config or {}).get("configurable") or {}).get("conversation_id")
 
     db = _get_db()
     try:
@@ -466,35 +673,91 @@ def draft_email(input_str: str) -> str:
                 "and retry with their exact name."
             )
 
-        subject, body = _compose_email(aff.name, situation, tone)
+        facts = _build_affiliate_facts(db, aff)
+        subject, body = _compose_email(aff.name, tone, facts, situation_override)
 
         # No contact email is stored in this schema (see src.storage.models.Affiliate)
         # — flagged clearly rather than fabricating a plausible-looking address.
         to_placeholder = f"{aff.name} <no email on file>"
+        new_payload = {
+            "to": to_placeholder,
+            "subject": subject,
+            "body": body,
+            "affiliate_id": str(aff.id),
+        }
 
-        approval = ApprovalRequest(
-            kind="email",
-            affiliate_id=aff.id,
-            payload={
-                "to": to_placeholder,
-                "subject": subject,
-                "body": body,
-                "affiliate_id": str(aff.id),
+        # Revise-in-place vs. create-new. Deliberately never matches on
+        # affiliate_id alone — without a real conversation_id there is no
+        # way to tell "the same conversation asking for a revision" apart
+        # from "an unrelated new conversation about the same affiliate",
+        # and guessing wrong would silently overwrite someone else's
+        # pending draft. See Phase 3 investigation: no session/conversation
+        # tracking existed anywhere in this system before this field.
+        existing = None
+        if conversation_id:
+            existing = (
+                db.query(ApprovalRequest)
+                .filter(
+                    ApprovalRequest.affiliate_id == aff.id,
+                    ApprovalRequest.session_id == conversation_id,
+                    ApprovalRequest.kind == "email",
+                    ApprovalRequest.status == "waiting_for_review",
+                )
+                .order_by(ApprovalRequest.created_at.desc())
+                .first()
+            )
+
+        if existing:
+            action = "revised"
+            existing.payload = new_payload
+            existing.updated_at = datetime.now(timezone.utc)
+            approval = existing
+        else:
+            action = "created"
+            approval = ApprovalRequest(
+                kind="email",
+                affiliate_id=aff.id,
+                session_id=conversation_id,
+                payload=new_payload,
+                status="waiting_for_review",
+            )
+            db.add(approval)
+
+        # Flush (not commit) so a brand-new row's server/default-generated id
+        # is populated on the Python object before the audit entry below
+        # needs to reference it — the revised case already has a real id,
+        # this only matters for the "created" branch.
+        db.flush()
+
+        write_audit_entry(
+            db,
+            stage="agent",
+            record_type="approval_request",
+            record_id=approval.id,
+            rule_or_tool="draft_email",
+            input_snapshot={
+                "affiliate_name": aff.name,
+                "situation_override": situation_override,
+                "tone": tone,
+                "facts": facts,
+                "conversation_id": conversation_id,
             },
-            status="waiting_for_review",
+            output_snapshot={"subject": subject, "body": body, "action": action},
         )
-        db.add(approval)
+
         db.commit()
         db.refresh(approval)
 
         logger.info(
-            "Draft email filed for approval",
-            extra={"approval_id": str(approval.id), "affiliate_id": str(aff.id)},
+            f"Draft email {action}",
+            extra={"approval_id": str(approval.id), "affiliate_id": str(aff.id), "action": action},
         )
 
+        action_verb = "Draft revised" if action == "revised" else "Draft created"
         return (
-            f"Draft created for {aff.name} — pending approval as request {approval.id}.\n"
+            f"{action_verb} for {aff.name} — pending approval as request {approval.id}.\n"
             f"Subject: {subject}\n\n"
+            f"Body:\n{body}\n\n"
             f"It will not be sent until a human approves it via "
             f"POST /approvals/{approval.id}/approve."
         )
@@ -511,10 +774,21 @@ def get_portfolio_health(input_str: str = "") -> str:
     churned affiliates, active promo-code leaks, and declining SEO trends.
     Use this for portfolio-level questions, including "which affiliates need
     attention" or "which affiliates have warning signs" — warning signs span
-    all three signal types this system tracks (churn/growth tier, leaks, SEO
-    trend), not just the rulebook tier, so check this tool's leak and SEO
-    counts/names too, not only the at-risk list."""
+    all four signal types this system tracks (churn/growth tier, leaks, SEO
+    trend, and low composite health score from weak growth), not just the
+    rulebook tier — check the Combined Signal Groups section, not only the
+    at-risk list.
+    By default this returns only the top/worst 3 of each ranked section. If
+    the user asks for the complete list (e.g. after seeing a capped summary,
+    or "show me all of them"), call this tool AGAIN with input_str="full" —
+    this returns every qualifying affiliate in the Worst/Top-by-health-score
+    and Combined Signal Groups sections instead of just 3. Always re-call
+    with input_str="full" for a full-list request — never invent additional
+    affiliate names or numbers to pad out a list yourself; every name and
+    every score you state must come from an actual tool result, never from
+    memory or estimation."""
     db = _get_db()
+    show_full = "full" in input_str.lower()
     try:
         affiliates = db.query(Affiliate).all()
         if not affiliates:
@@ -546,8 +820,40 @@ def get_portfolio_health(input_str: str = "") -> str:
 
         score_history_count = db.query(ScoreHistory).count()
 
-        worst = sorted(affiliates, key=lambda a: a.health_score or 50.0)[:3]
-        best = sorted(affiliates, key=lambda a: a.health_score or 50.0, reverse=True)[:3]
+        # The health-score band (composite of churn + growth) and the rulebook
+        # tier (churn alone — src.rulebook.recommend.categorize, the system's
+        # single source of truth for risk classification) can disagree: a high
+        # growth potential can pull an at_risk-tier affiliate's health score
+        # above PERFORMING_WELL_THRESHOLD, and a low growth potential can pull
+        # a churn-healthy affiliate's health score below NEEDS_ATTENTION_THRESHOLD.
+        # The rulebook tier wins whenever the two conflict, so this tool never
+        # calls an at_risk/churned-tier affiliate "performing well", and never
+        # omits one from "needs attention" just because their composite score
+        # looks fine.
+        _at_risk_tiers = ("at_risk", "churned")
+        performing_well = [
+            a for a in affiliates
+            if (a.health_score or 50.0) >= PERFORMING_WELL_THRESHOLD
+            and tiers[a.id] not in _at_risk_tiers
+        ]
+        needs_attention = [
+            a for a in affiliates
+            if (a.health_score or 50.0) < NEEDS_ATTENTION_THRESHOLD
+            or tiers[a.id] in _at_risk_tiers
+        ]
+        # The subset of needs_attention that the churn/growth tier signal alone
+        # would miss — i.e. affiliates pulled below NEEDS_ATTENTION_THRESHOLD by
+        # weak growth potential while their churn risk stays under the at_risk
+        # cutoff (e.g. Marcus Williams: churn 45% < 50% threshold, growth 10%).
+        # Tracked as its own signal source below so Combined Signal Groups can't
+        # silently disagree with this section about who "needs attention" and why.
+        low_health_only = [
+            a for a in needs_attention if tiers[a.id] not in _at_risk_tiers
+        ]
+        best_full = sorted(performing_well, key=lambda a: a.health_score or 50.0, reverse=True)
+        worst_full = sorted(needs_attention, key=lambda a: a.health_score or 50.0)
+        best = best_full if show_full else best_full[:3]
+        worst = worst_full if show_full else worst_full[:3]
 
         lines = [
             "═══ PORTFOLIO HEALTH SUMMARY ═══",
@@ -563,14 +869,51 @@ def get_portfolio_health(input_str: str = "") -> str:
             f"Active promo-code leaks: {len(leaking)} affiliate(s)  (separate signal — not a tier)",
             f"Declining SEO trend:     {len(declining_seo)} affiliate(s)  (separate signal — not a tier)",
             "",
-            "─── Worst 3 (needs attention) ───",
+            f"─── Worst {len(worst)} of {len(needs_attention)} by health score "
+            f"(health < {NEEDS_ATTENTION_THRESHOLD:.0f}, or churn-tier at_risk/churned) ───",
+            "(A narrower, health/tier-only slice — see Combined Signal Groups below "
+            "for the full attention/warning-signs picture, which also includes "
+            "leak- and SEO-only affiliates this section does not.)",
         ]
-        for a in worst:
-            lines.append(f"  • {a.name}: health={a.health_score:.1f}, churn={a.churn_risk_score:.1%}, silent={a.days_since_contact}d")
+        if worst:
+            for a in worst:
+                lines.append(f"  • {a.name}: health={a.health_score:.1f}, churn={a.churn_risk_score:.1%}, silent={a.days_since_contact}d")
+            if not show_full and len(needs_attention) > len(worst):
+                lines += [
+                    "",
+                    f"(Showing {len(worst)} of {len(needs_attention)} — call this same tool "
+                    "again with input_str='full' for the complete list; do not guess or "
+                    "invent the remaining names.)",
+                ]
+        else:
+            lines.append(
+                f"No affiliates currently fall below the health/tier threshold (health < "
+                f"{NEEDS_ATTENTION_THRESHOLD:.0f} and no churn-tier at_risk/churned) — "
+                "portfolio is stable by this narrower measure "
+                "(Combined Signal Groups below may still show leak/SEO-only affiliates)."
+            )
 
-        lines += ["", "─── Top 3 (performing well) ─────"]
-        for a in best:
-            lines.append(f"  • {a.name}: health={a.health_score:.1f}, growth={a.growth_potential_score:.1%}")
+        lines += [
+            "",
+            f"─── Top {len(best)} of {len(performing_well)} performing well "
+            f"(health >= {PERFORMING_WELL_THRESHOLD:.0f}, excluding any churn-tier at_risk/churned) ───",
+        ]
+        if best:
+            for a in best:
+                lines.append(f"  • {a.name}: health={a.health_score:.1f}, growth={a.growth_potential_score:.1%}")
+            if not show_full and len(performing_well) > len(best):
+                lines += [
+                    "",
+                    f"(Showing {len(best)} of {len(performing_well)} — call this same tool "
+                    "again with input_str='full' for the complete list; do not guess or "
+                    "invent the remaining names.)",
+                ]
+        else:
+            lines.append(
+                f"No affiliates currently meet the performing-well threshold "
+                f"(health >= {PERFORMING_WELL_THRESHOLD:.0f} with no churn-tier "
+                "at_risk/churned)."
+            )
 
         if at_risk:
             lines += ["", "─── At-Risk Names ───────────────"]
@@ -583,6 +926,91 @@ def get_portfolio_health(input_str: str = "") -> str:
         if declining_seo:
             lines += ["", "─── Declining SEO Names ─────────"]
             lines.append("  " + ", ".join(a.name for a in declining_seo))
+
+        # Which affiliates are flagged by 2+ of the four independent signal
+        # types below vs. exactly 1 — computed here in code rather than left
+        # for the agent to count itself. The LLM was observed to miscount this
+        # split on its own (e.g. calling a single-signal at_risk affiliate
+        # "multiple warning signs"), which is exactly the class of mechanical
+        # judgment this codebase deliberately keeps out of the agent's own
+        # reasoning (see SYSTEM_PROMPT's "business logic lives in tested code,
+        # not in you" and src.rulebook.recommend). The fourth source
+        # (low_health_only) exists so this section can't silently disagree
+        # with the "Worst N needing attention" section above about who needs
+        # attention and why — see that section's own comment for the Marcus
+        # Williams case (low growth pulling health down without elevated churn).
+        _signal_sources = [
+            ("at-risk/churned churn-growth tier", at_risk + churned),
+            ("active promo-code leak", leaking),
+            ("declining SEO trend", declining_seo),
+            ("low composite health score (weak growth, not elevated churn)", low_health_only),
+        ]
+        signal_labels: dict = {}
+        for label, group in _signal_sources:
+            for a in group:
+                signal_labels.setdefault(a.id, []).append(label)
+
+        flagged = [a for a in affiliates if a.id in signal_labels]
+
+        # Signal COUNT (how many independent systems flagged someone) is not
+        # the same thing as SEVERITY (how bad their underlying risk actually
+        # is) — an affiliate tripping 3 mild signals should not outrank one
+        # who is genuinely close to churning. Severity is the ONLY sort key:
+        # churned tier is most urgent, then at_risk, then a low composite
+        # health score from weak growth alone, then leak/SEO-only, health
+        # ascending as the tiebreaker within each rank. Signal count is still
+        # shown per line (breadth is useful context) but never determines
+        # position in the list — a single-signal at_risk affiliate outranks a
+        # multi-signal leak+SEO affiliate whose churn is otherwise healthy.
+        _low_health_only_ids = {a.id for a in low_health_only}
+
+        def _severity_rank(a) -> int:
+            tier = tiers[a.id]
+            if tier == "churned":
+                return 0
+            if tier == "at_risk":
+                return 1
+            if a.id in _low_health_only_ids:
+                return 2
+            return 3
+
+        def _severity_sort_key(a):
+            return (_severity_rank(a), a.health_score or 50.0)
+
+        ordered = sorted(flagged, key=_severity_sort_key)
+
+        lines += ["", "─── Combined Signal Groups (ordered by severity, most urgent first) ─────────"]
+        if ordered:
+            for a in ordered:
+                count = len(signal_labels[a.id])
+                suffix = f" [{count} signals]" if count >= 2 else ""
+                lines.append(f"  • {a.name} — {', '.join(signal_labels[a.id])}{suffix}")
+
+            # Cross-reference, not a re-ranking: leak/SEO-only names (severity
+            # rank 3 — the mildest tier, structurally different from a churn/
+            # growth-tier or low-health signal) can otherwise read as
+            # afterthoughts despite still needing action. Deliberately scoped
+            # to rank 3 only — an at_risk/churned-tier or low-health-only
+            # affiliate with a single signal (e.g. Tom Bauer, James O'Brien)
+            # is already unambiguously top priority by its position at the
+            # top of the list; grouping them into this same reassurance note
+            # would undersell them by association, exactly the confusion this
+            # note exists to prevent for the milder cases.
+            minor_single_signal_names = [
+                a.name for a in ordered
+                if len(signal_labels[a.id]) == 1 and _severity_rank(a) == 3
+            ]
+            if minor_single_signal_names:
+                lines += [
+                    "",
+                    f"  Note: {', '.join(minor_single_signal_names)} show only a leak or "
+                    "SEO signal (no elevated churn or low health) — still worth "
+                    "addressing, not lower priority by default. This does not apply to "
+                    "any at-risk/churned-tier or low-health affiliate above, which is "
+                    "already top priority by its position in this list.",
+                ]
+        else:
+            lines.append("  No affiliates currently flagged by any of these four signal types.")
 
         return "\n".join(lines)
     finally:
@@ -617,22 +1045,7 @@ def get_leakage_status(affiliate_id: str) -> str:
     db = _get_db()
     try:
         aff = db.query(Affiliate).filter(Affiliate.id == aff_uuid).first()
-
-        # Fast path: has_active_leak is recomputed from the full leaked_codes
-        # table on every scan (src.scraping.leakage_scraper) — if it's False
-        # (or the affiliate doesn't exist), querying LeakedCode would
-        # necessarily return nothing, so skip it. Only a safe drop-in for the
-        # "no leak" case — when True, the actual rows are still needed below
-        # for site/code/url detail, which the flag alone cannot provide.
-        recent = []
-        if aff and aff.has_active_leak:
-            recent = (
-                db.query(LeakedCode)
-                .filter(LeakedCode.affiliate_id == aff_uuid)
-                .order_by(LeakedCode.found_at.desc())
-                .limit(5)
-                .all()
-            )
+        recent = _get_recent_leaks(db, aff)
     finally:
         db.close()
 
@@ -687,20 +1100,7 @@ def get_seo_status(affiliate_id: str) -> str:
     db = _get_db()
     try:
         aff = db.query(Affiliate).filter(Affiliate.id == aff_uuid).first()
-
-        # Fast path: search_trend is recomputed from the full seo_signals
-        # table on every check (src.seo.checker) — if the affiliate has no
-        # tracked_keyword (or doesn't exist), querying SeoSignal would
-        # necessarily return nothing, so skip it.
-        recent = []
-        if aff and aff.tracked_keyword:
-            recent = (
-                db.query(SeoSignal)
-                .filter(SeoSignal.affiliate_id == aff_uuid)
-                .order_by(SeoSignal.checked_at.desc())
-                .limit(5)
-                .all()
-            )
+        recent = _get_recent_seo(db, aff)
     finally:
         db.close()
 

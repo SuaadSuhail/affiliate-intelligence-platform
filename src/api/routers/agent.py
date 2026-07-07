@@ -26,6 +26,12 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     message: str
     conversation_history: Optional[list] = None
+    # Client-generated, stable for the life of one chat session (regenerated
+    # on "New chat"). Not used for message history — the client still resends
+    # that in full — only so draft_email can tell "revise this draft" apart
+    # from "draft an unrelated new one" within the same conversation. See
+    # src.agent.tools.draft_email.
+    conversation_id: Optional[str] = None
 
 
 class QuickRequest(BaseModel):
@@ -63,7 +69,9 @@ def agent_chat(request: ChatRequest) -> ChatResponse:
     from src.agent.agent import run_agent
 
     try:
-        result = run_agent(request.message, request.conversation_history)
+        result = run_agent(
+            request.message, request.conversation_history, conversation_id=request.conversation_id
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:

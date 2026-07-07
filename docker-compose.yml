@@ -38,6 +38,7 @@ services:
       - "8080:8080"
     volumes:
       - ./src:/app/src
+      - ./tests:/app/tests
       - ./data:/app/data
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini
